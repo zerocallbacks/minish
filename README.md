@@ -294,6 +294,8 @@ minish$ findempty /tmp/sessions -d
 
 ## Packaging & Installation
 
+> 📦 **Pre-compiled Packages**: Download ready-to-install `.deb`, `.rpm`, and standalone static binaries directly from [GitHub Releases](https://github.com/zerocallbacks/minish/releases/latest).
+
 ### Option 1: Ubuntu / Debian (`.deb`)
 
 Build and install a native Debian package:
