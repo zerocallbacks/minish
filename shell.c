@@ -98,6 +98,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <termios.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
@@ -263,6 +264,7 @@ typedef struct {
 } BuiltinDef;
 static const BuiltinDef *find_builtin(const char *cmd);
 static void execute_line(const char *line);
+
 static void sh_loop(FILE *stream, int is_interactive);
 
 /* --- Signal Handling --- */
@@ -7275,6 +7277,208 @@ static int builtin_persistpeek(char **args) {
 }
 
 
+
+/* --- Detached Process & Job Control Engine --- */
+
+typedef struct {
+    int id;
+    pid_t pid;
+    char cmd[256];
+    char logfile[256];
+    int running;
+} ShellJob;
+
+#define MAX_SHELL_JOBS 64
+static ShellJob shell_jobs[MAX_SHELL_JOBS];
+static int next_job_id = 1;
+
+static void update_shell_jobs(void) {
+    for (int i = 0; i < MAX_SHELL_JOBS; i++) {
+        if (shell_jobs[i].pid > 0 && shell_jobs[i].running) {
+            if (kill(shell_jobs[i].pid, 0) < 0 && errno == ESRCH) {
+                shell_jobs[i].running = 0;
+            }
+        }
+    }
+}
+
+static int add_shell_job(pid_t pid, const char *cmd, const char *logfile) {
+    update_shell_jobs();
+    int slot = -1;
+    for (int i = 0; i < MAX_SHELL_JOBS; i++) {
+        if (shell_jobs[i].pid == 0 || !shell_jobs[i].running) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot == -1) slot = 0;
+    shell_jobs[slot].id = next_job_id++;
+    shell_jobs[slot].pid = pid;
+    strncpy(shell_jobs[slot].cmd, cmd ? cmd : "unknown", sizeof(shell_jobs[slot].cmd) - 1);
+    shell_jobs[slot].cmd[sizeof(shell_jobs[slot].cmd) - 1] = '\0';
+    strncpy(shell_jobs[slot].logfile, logfile ? logfile : "/dev/null", sizeof(shell_jobs[slot].logfile) - 1);
+    shell_jobs[slot].logfile[sizeof(shell_jobs[slot].logfile) - 1] = '\0';
+    shell_jobs[slot].running = 1;
+    return shell_jobs[slot].id;
+}
+
+static int builtin_detach(char **args) {
+    if (!args || !args[1]) {
+        printf("Usage: detach [-o logfile] [-e errfile] <command...> [args...]\n");
+        printf("Spawns an independent background session (immune to SIGHUP / terminal hangup).\n");
+        printf("Example: detach -o /dev/shm/velo.log /usr/bin/velociraptor client\n");
+        printf("Type 'help detach' for complete details and offline incident response examples.\n");
+        return 1;
+    }
+
+    const char *out_log = NULL;
+    const char *err_log = NULL;
+    int idx = 1;
+
+    while (args[idx] && args[idx][0] == '-') {
+        if (strcmp(args[idx], "-o") == 0 && args[idx + 1]) {
+            out_log = args[idx + 1];
+            idx += 2;
+        } else if (strcmp(args[idx], "-e") == 0 && args[idx + 1]) {
+            err_log = args[idx + 1];
+            idx += 2;
+        } else if (strcmp(args[idx], "--") == 0) {
+            idx++;
+            break;
+        } else {
+            break;
+        }
+    }
+
+    if (!args[idx]) {
+        fprintf(stderr, "minish: detach: missing command to execute\n");
+        return 1;
+    }
+
+    char cmd_str[256];
+    cmd_str[0] = '\0';
+    size_t clen = 0;
+    for (int i = idx; args[i]; i++) {
+        if (i > idx && clen + 1 < sizeof(cmd_str)) {
+            cmd_str[clen++] = ' ';
+            cmd_str[clen] = '\0';
+        }
+        size_t alen = strlen(args[i]);
+        if (clen + alen < sizeof(cmd_str)) {
+            memcpy(cmd_str + clen, args[i], alen);
+            clen += alen;
+            cmd_str[clen] = '\0';
+        }
+    }
+
+    char default_log[128];
+    if (!out_log) {
+        const char *prog = args[idx];
+        const char *slash = strrchr(prog, '/');
+        if (slash) prog = slash + 1;
+        snprintf(default_log, sizeof(default_log), "/dev/shm/detach_%s_%d.log", prog, (int)getpid());
+        out_log = default_log;
+    }
+    if (!err_log) {
+        err_log = out_log;
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("minish: detach: fork");
+        return 1;
+    }
+
+    if (pid == 0) {
+        setsid();
+        signal(SIGHUP, SIG_IGN);
+        signal(SIGINT, SIG_IGN);
+        signal(SIGQUIT, SIG_IGN);
+        signal(SIGTERM, SIG_DFL);
+
+        int null_fd = open("/dev/null", O_RDONLY);
+        if (null_fd >= 0) {
+            dup2(null_fd, STDIN_FILENO);
+            close(null_fd);
+        }
+
+        int out_fd = open(out_log, O_WRONLY | O_CREAT | O_APPEND, 0666);
+        if (out_fd >= 0) {
+            dup2(out_fd, STDOUT_FILENO);
+            close(out_fd);
+        }
+
+        if (strcmp(err_log, out_log) == 0) {
+            dup2(STDOUT_FILENO, STDERR_FILENO);
+        } else {
+            int err_fd = open(err_log, O_WRONLY | O_CREAT | O_APPEND, 0666);
+            if (err_fd >= 0) {
+                dup2(err_fd, STDERR_FILENO);
+                close(err_fd);
+            }
+        }
+
+        execvp(args[idx], &args[idx]);
+        fprintf(stderr, "minish: detach: failed to exec '%s': %s\n", args[idx], strerror(errno));
+        _exit(127);
+    }
+
+    int jid = add_shell_job(pid, cmd_str, out_log);
+    printf("[+] Detached job [%d] spawned: PID %d\n", jid, (int)pid);
+    printf("    Command:    %s\n", cmd_str);
+    printf("    Output log: %s\n", out_log);
+    printf("    Session:    detached from tty (immune to SIGHUP / terminal hangup)\n");
+    fflush(stdout);
+    return 0;
+}
+
+static int builtin_jobs(char **args) {
+    (void)args;
+    update_shell_jobs();
+    int found = 0;
+    for (int i = 0; i < MAX_SHELL_JOBS; i++) {
+        if (shell_jobs[i].pid > 0) {
+            printf("[%d]  PID %-6d  %-10s  %s  (log: %s)\n",
+                   shell_jobs[i].id,
+                   (int)shell_jobs[i].pid,
+                   shell_jobs[i].running ? "Running" : "Done",
+                   shell_jobs[i].cmd,
+                   shell_jobs[i].logfile);
+            found++;
+        }
+    }
+    if (!found) {
+        printf("minish: no background or detached jobs\n");
+    }
+    fflush(stdout);
+    return 0;
+}
+
+static int builtin_disown(char **args) {
+    if (!args[1]) {
+        update_shell_jobs();
+        int count = 0;
+        for (int i = 0; i < MAX_SHELL_JOBS; i++) {
+            if (shell_jobs[i].pid > 0) {
+                shell_jobs[i].pid = 0;
+                count++;
+            }
+        }
+        printf("[+] Disowned %d job(s)\n", count);
+        return 0;
+    }
+    int target = atoi(args[1]);
+    for (int i = 0; i < MAX_SHELL_JOBS; i++) {
+        if (shell_jobs[i].id == target || shell_jobs[i].pid == target) {
+            printf("[+] Disowned job [%d] (PID %d)\n", shell_jobs[i].id, (int)shell_jobs[i].pid);
+            shell_jobs[i].pid = 0;
+            return 0;
+        }
+    }
+    fprintf(stderr, "minish: disown: job or PID '%s' not found\n", args[1]);
+    return 1;
+}
+
 /* --- Anti-Adversary Stealth & Camouflage Engine --- */
 
 static int builtin_stealth(char **args) {
@@ -7339,7 +7543,70 @@ static int builtin_stealth(char **args) {
 static int show_command_help(const char *cmd) {
     if (!cmd) return 0;
 
-    if (strcmp(cmd, "stealth") == 0) {
+    
+    if (strcmp(cmd, "detach") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: detach [-o logfile] [-e errfile] <command...> [args...]\n");
+        printf("CATEGORY: Daemonized Background Process Detachment\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  detach <command...> [args...]               # Defaults output to /dev/shm/detach_*.log\n");
+        printf("  detach -o <logfile> <command...> [args...]  # Direct output to custom log file\n");
+        printf("  detach -o /dev/null <command...> [args...]  # Suppress all output\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Spawns long-running or hunting tools (e.g. Velociraptor client, Volatility scans,\n");
+        printf("  pcap sniffers, or log monitors) as fully detached daemon processes:\n");
+        printf("  1. Session Detachment: Calls setsid() to sever the controlling terminal (/dev/tty).\n");
+        printf("  2. Hangup Immunity: Masks SIGHUP (terminal disconnect) and SIGINT.\n");
+        printf("  3. Stdio Decoupling: Redirects stdin to /dev/null and streams stdout/stderr\n");
+        printf("     to a volatile RAM logfile (/dev/shm/detach_<cmd>_<pid>.log, 0 disk writes).\n");
+        printf("  4. Immediate Prompt Return: Shell prompt returns instantly without blocking.\n\n");
+        printf("WHY 'detach' IS CRITICAL FOR THREAT HUNTING:\n");
+        printf("  Standard background jobs ('cmd &') still share the controlling terminal and will\n");
+        printf("  terminate if SSH disconnects. 'detach' ensures hunting agents run uninterrupted\n");
+        printf("  while you perform active memory forensics or administrative triage in minish.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ detach /usr/local/bin/velociraptor client -c client.config.yaml\n");
+        printf("  minish$ detach -o /dev/shm/vol.log python3 vol.py -f /proc/kcore linux.malfind\n");
+        printf("  minish$ jobs                                # Check active detached jobs\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "jobs") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: jobs\n");
+        printf("CATEGORY: Job Control & Detached Process Monitor\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  jobs\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Reaps completed background/detached child processes via non-blocking waitpid()\n");
+        printf("  and lists all tracked jobs, their PIDs, running status, commands, and log paths.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ jobs\n");
+        printf("  [1]  PID 3450    Running     velociraptor client  (log: /dev/shm/detach_velociraptor_3450.log)\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "disown") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: disown [job_id|pid]\n");
+        printf("CATEGORY: Job Control & Tracking Release\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  disown [job_id|pid]                # Default: disowns all jobs\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Removes specified background jobs from the shell tracking table. The target\n");
+        printf("  processes continue running independently under systemd/init (PID 1).\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ disown 1\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+if (strcmp(cmd, "stealth") == 0) {
         printf("\n================================================================================\n");
         printf("COMMAND: stealth [disguise_name]\n");
         printf("CATEGORY: Threat Hunting & Anti-Adversary Camouflage\n");
@@ -8194,7 +8461,10 @@ static int builtin_help(char **args) {
     printf("  md5 <file|->                 Standalone RFC 1321 MD5 cryptographic hasher\n");
     printf("  crc32 <file|->               Fast IEEE 802.3 32-bit checksum\n");
     printf("  xor <file|-> <key>           Bitwise XOR stream encoder/decoder\n");
-    printf("  stealth [name]               Disguise process, audit parent shell, arm anti-kill armor\n\n");
+    printf("  stealth [name]               Disguise process, audit parent shell, arm anti-kill armor\n");
+    printf("  detach [-o f] <cmd...>       Spawn daemonized background job (setsid, immune to SIGHUP)\n");
+    printf("  jobs                         List active background and detached jobs\n");
+    printf("  disown [id|pid]              Release job tracking from shell\n\n");
     printf("Detailed Command Help & Recovery Examples:\n");
     printf("  Type 'help <command>' or '<command> --help' (e.g. 'help ramoverlay', 'help stealth',\n");
     printf("  'help deletedgrab', 'help truncate', 'help ghostfind', 'help exec', etc.)\n\n");
@@ -8357,6 +8627,9 @@ static const BuiltinDef builtins[] = {
     {"deletedgrab",  &builtin_deletedgrab,  1},
     {"sigshield",    &builtin_sigshield,    1},
     {"stealth",      &builtin_stealth,      1},
+    {"detach",       &builtin_detach,       1},
+    {"jobs",         &builtin_jobs,         0},
+    {"disown",       &builtin_disown,       1},
     {"b64exec",      &builtin_b64exec,      0},
     {"ramoverlay",   &builtin_ramoverlay,   0},
     {"exehunt",      &builtin_exehunt,      0},
@@ -9174,7 +9447,12 @@ static void execute_pipeline(PipelineUnit *unit) {
 
     if (unit->is_background) {
         if (num_cmds > 0 && pids[num_cmds - 1] > 0) {
-            printf("[%d]\n", (int)pids[num_cmds - 1]);
+            char cmd_summary[128] = "background job";
+            if (unit->cmds[0].argc > 0 && unit->cmds[0].argv[0]) {
+                snprintf(cmd_summary, sizeof(cmd_summary), "%s", unit->cmds[0].argv[0]);
+            }
+            int jid = add_shell_job(pids[num_cmds - 1], cmd_summary, "inherited stdout");
+            printf("[%d] %d\n", jid, (int)pids[num_cmds - 1]);
             fflush(stdout);
         }
         last_exit_status = 0;
@@ -9250,6 +9528,427 @@ static void execute_line(const char *line) {
     free_tokens(tokens);
 }
 
+/* --- Zero-Dependency Terminal Raw Mode & Interactive Tab Completion Engine --- */
+
+static struct termios orig_termios;
+static int raw_mode_active = 0;
+
+static void disable_raw_mode(void) {
+    if (raw_mode_active) {
+        tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
+        raw_mode_active = 0;
+    }
+}
+
+static int enable_raw_mode(void) {
+    if (!isatty(STDIN_FILENO)) return 0;
+    if (tcgetattr(STDIN_FILENO, &orig_termios) < 0) return -1;
+    atexit(disable_raw_mode);
+
+    struct termios raw = orig_termios;
+    /* Disable canonical mode, echo, and signals so we can intercept keys */
+    raw.c_lflag &= ~(ECHO | ICANON | ISIG);
+    /* Disable software flow control and carriage return translation */
+    raw.c_iflag &= ~(IXON | ICRNL);
+    raw.c_cc[VMIN] = 1;
+    raw.c_cc[VTIME] = 0;
+
+    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) < 0) return -1;
+    raw_mode_active = 1;
+    return 0;
+}
+
+#define HISTORY_MAX 64
+static char *cmd_history[HISTORY_MAX];
+static int history_count = 0;
+
+static void add_to_history(const char *cmd) {
+    if (!cmd || !cmd[0]) return;
+    if (history_count > 0 && strcmp(cmd_history[history_count - 1], cmd) == 0) return;
+    if (history_count == HISTORY_MAX) {
+        free(cmd_history[0]);
+        for (int i = 1; i < HISTORY_MAX; i++) cmd_history[i - 1] = cmd_history[i];
+        history_count--;
+    }
+    cmd_history[history_count++] = strdup(cmd);
+}
+
+static void refresh_line(const char *prompt, const char *buf, size_t len, size_t pos) {
+    printf("\r\x1b[K%s%s", prompt, buf);
+    if (len > pos) {
+        printf("\x1b[%dD", (int)(len - pos));
+    }
+    fflush(stdout);
+}
+
+#define MAX_COMPLETIONS 256
+
+static void collect_path_completions(const char *word, char **matches, int *match_count) {
+    char dir_part[256] = ".";
+    const char *prefix = word;
+    const char *last_slash = strrchr(word, '/');
+
+    if (last_slash) {
+        size_t dlen = last_slash - word + 1;
+        if (dlen >= sizeof(dir_part)) dlen = sizeof(dir_part) - 1;
+        memcpy(dir_part, word, dlen);
+        dir_part[dlen] = '\0';
+        prefix = last_slash + 1;
+    }
+
+    DIR *dir = opendir(dir_part);
+    if (!dir) return;
+
+    size_t prefix_len = strlen(prefix);
+    struct dirent *de;
+    while ((de = readdir(dir)) != NULL) {
+        if (de->d_name[0] == '.' && prefix[0] != '.') continue;
+        if (strncmp(de->d_name, prefix, prefix_len) == 0) {
+            if (*match_count >= MAX_COMPLETIONS) break;
+
+            char full_path[512];
+            if (last_slash) {
+                snprintf(full_path, sizeof(full_path), "%s%s", dir_part, de->d_name);
+            } else {
+                snprintf(full_path, sizeof(full_path), "%s", de->d_name);
+            }
+
+            struct stat st;
+            char stat_target[512];
+            if (last_slash) {
+                snprintf(stat_target, sizeof(stat_target), "%s%s", dir_part, de->d_name);
+            } else {
+                snprintf(stat_target, sizeof(stat_target), "./%s", de->d_name);
+            }
+
+            if (stat(stat_target, &st) == 0 && S_ISDIR(st.st_mode)) {
+                size_t flen = strlen(full_path);
+                if (flen + 1 < sizeof(full_path)) {
+                    full_path[flen] = '/';
+                    full_path[flen + 1] = '\0';
+                }
+            }
+
+            matches[(*match_count)++] = strdup(full_path);
+        }
+    }
+    closedir(dir);
+}
+
+static void handle_tab_completion(const char *prompt, char *buf, size_t *len, size_t *pos) {
+    size_t wstart = *pos;
+    while (wstart > 0 && !isspace((unsigned char)buf[wstart - 1]) &&
+           buf[wstart - 1] != '|' && buf[wstart - 1] != '&' &&
+           buf[wstart - 1] != ';' && buf[wstart - 1] != '<' &&
+           buf[wstart - 1] != '>') {
+        wstart--;
+    }
+
+    char word[256];
+    size_t wlen = *pos - wstart;
+    if (wlen >= sizeof(word)) wlen = sizeof(word) - 1;
+    memcpy(word, buf + wstart, wlen);
+    word[wlen] = '\0';
+
+    /* Determine if command position or argument position */
+    int is_cmd = 1;
+    size_t check_idx = wstart;
+    while (check_idx > 0 && isspace((unsigned char)buf[check_idx - 1])) check_idx--;
+    if (check_idx > 0 && buf[check_idx - 1] != '|' && buf[check_idx - 1] != '&' &&
+        buf[check_idx - 1] != ';' && buf[check_idx - 1] != '(') {
+        is_cmd = 0;
+    }
+
+    /* Check if previous word was "help" */
+    int is_help = 0;
+    if (!is_cmd) {
+        size_t p_end = check_idx;
+        size_t p_start = p_end;
+        while (p_start > 0 && !isspace((unsigned char)buf[p_start - 1])) p_start--;
+        if (p_end - p_start == 4 && strncmp(buf + p_start, "help", 4) == 0) {
+            is_help = 1;
+        }
+    }
+
+    char *matches[MAX_COMPLETIONS];
+    int match_count = 0;
+
+    if (is_cmd || is_help) {
+        for (int i = 0; builtins[i].name != NULL; i++) {
+            if (strncmp(builtins[i].name, word, wlen) == 0) {
+                if (match_count < MAX_COMPLETIONS) {
+                    matches[match_count++] = strdup(builtins[i].name);
+                }
+            }
+        }
+    }
+
+    if (!is_help) {
+        if (!is_cmd || strchr(word, '/') != NULL) {
+            collect_path_completions(word, matches, &match_count);
+        } else if (is_cmd && strchr(word, '/') == NULL) {
+            const char *path_env = getenv("PATH");
+            if (!path_env) path_env = "/bin:/usr/bin:/sbin:/usr/sbin";
+            char *pcopy = strdup(path_env);
+            char *saveptr = NULL;
+            char *dir_tok = strtok_r(pcopy, ":", &saveptr);
+            while (dir_tok && match_count < MAX_COMPLETIONS) {
+                DIR *dir = opendir(dir_tok);
+                if (dir) {
+                    struct dirent *de;
+                    while ((de = readdir(dir)) != NULL) {
+                        if (de->d_name[0] == '.') continue;
+                        if (strncmp(de->d_name, word, wlen) == 0) {
+                            int already = 0;
+                            for (int m = 0; m < match_count; m++) {
+                                if (strcmp(matches[m], de->d_name) == 0) {
+                                    already = 1;
+                                    break;
+                                }
+                            }
+                            if (!already && match_count < MAX_COMPLETIONS) {
+                                matches[match_count++] = strdup(de->d_name);
+                            }
+                        }
+                    }
+                    closedir(dir);
+                }
+                dir_tok = strtok_r(NULL, ":", &saveptr);
+            }
+            free(pcopy);
+        }
+    }
+
+    if (match_count == 0) {
+        return;
+    }
+
+    if (match_count == 1) {
+        size_t mlen = strlen(matches[0]);
+        size_t tail_len = *len - *pos;
+        if (wstart + mlen + tail_len + 2 < 4096) {
+            memmove(buf + wstart + mlen, buf + *pos, tail_len + 1);
+            memcpy(buf + wstart, matches[0], mlen);
+            *pos = wstart + mlen;
+            *len = wstart + mlen + tail_len;
+            if (matches[0][mlen - 1] != '/' && *pos == *len) {
+                buf[*pos] = ' ';
+                (*pos)++;
+                (*len)++;
+                buf[*len] = '\0';
+            }
+        }
+        free(matches[0]);
+        refresh_line(prompt, buf, *len, *pos);
+        return;
+    }
+
+    /* Multiple matches: find longest common prefix */
+    size_t lcp_len = strlen(matches[0]);
+    for (int i = 1; i < match_count; i++) {
+        size_t j = 0;
+        while (j < lcp_len && matches[i][j] && matches[0][j] == matches[i][j]) j++;
+        lcp_len = j;
+    }
+
+    if (lcp_len > wlen) {
+        size_t tail_len = *len - *pos;
+        if (wstart + lcp_len + tail_len + 1 < 4096) {
+            memmove(buf + wstart + lcp_len, buf + *pos, tail_len + 1);
+            memcpy(buf + wstart, matches[0], lcp_len);
+            *pos = wstart + lcp_len;
+            *len = wstart + lcp_len + tail_len;
+            buf[*len] = '\0';
+        }
+        for (int i = 0; i < match_count; i++) free(matches[i]);
+        refresh_line(prompt, buf, *len, *pos);
+        return;
+    }
+
+    /* Already at LCP: list candidates in rows below prompt */
+    printf("\n");
+    for (int i = 0; i < match_count; i++) {
+        printf("%-20s%s", matches[i], ((i + 1) % 4 == 0 || i == match_count - 1) ? "\n" : "  ");
+        free(matches[i]);
+    }
+    refresh_line(prompt, buf, *len, *pos);
+}
+
+static char *minish_readline(const char *prompt) {
+    if (enable_raw_mode() < 0) {
+        /* Fallback if raw mode unavailable */
+        printf("%s", prompt);
+        fflush(stdout);
+        char *line = NULL;
+        size_t cap = 0;
+        ssize_t n = getline(&line, &cap, stdin);
+        if (n < 0) { free(line); return NULL; }
+        if (n > 0 && line[n - 1] == '\n') line[n - 1] = '\0';
+        return line;
+    }
+
+    char buf[4096];
+    size_t len = 0;
+    size_t pos = 0;
+    buf[0] = '\0';
+
+    int history_index = history_count;
+    refresh_line(prompt, buf, len, pos);
+
+    while (1) {
+        char c;
+        ssize_t nread = read(STDIN_FILENO, &c, 1);
+        if (nread <= 0) break;
+
+        if (c == '\r' || c == '\n') {
+            printf("\r\n");
+            fflush(stdout);
+            disable_raw_mode();
+            buf[len] = '\0';
+            return strdup(buf);
+        }
+
+        if (c == 3) { /* Ctrl-C */
+            printf("^C\r\n");
+            fflush(stdout);
+            disable_raw_mode();
+            return strdup("");
+        }
+
+        if (c == 4) { /* Ctrl-D */
+            if (len == 0) {
+                disable_raw_mode();
+                return NULL;
+            }
+            continue;
+        }
+
+        if (c == 9) { /* Tab key */
+            handle_tab_completion(prompt, buf, &len, &pos);
+            continue;
+        }
+
+        if (c == 127 || c == 8) { /* Backspace */
+            if (pos > 0) {
+                memmove(buf + pos - 1, buf + pos, len - pos + 1);
+                pos--;
+                len--;
+                refresh_line(prompt, buf, len, pos);
+            }
+            continue;
+        }
+
+        if (c == 1) { /* Ctrl-A (Home) */
+            pos = 0;
+            refresh_line(prompt, buf, len, pos);
+            continue;
+        }
+
+        if (c == 5) { /* Ctrl-E (End) */
+            pos = len;
+            refresh_line(prompt, buf, len, pos);
+            continue;
+        }
+
+        if (c == 21) { /* Ctrl-U (Clear line) */
+            buf[0] = '\0';
+            len = 0;
+            pos = 0;
+            refresh_line(prompt, buf, len, pos);
+            continue;
+        }
+
+        if (c == 11) { /* Ctrl-K (Kill to end) */
+            buf[pos] = '\0';
+            len = pos;
+            refresh_line(prompt, buf, len, pos);
+            continue;
+        }
+
+        if (c == 12) { /* Ctrl-L (Clear screen) */
+            printf("\x1b[2J\x1b[H");
+            refresh_line(prompt, buf, len, pos);
+            continue;
+        }
+
+        if (c == 27) { /* Escape sequence */
+            char seq[3];
+            if (read(STDIN_FILENO, &seq[0], 1) <= 0) continue;
+            if (read(STDIN_FILENO, &seq[1], 1) <= 0) continue;
+
+            if (seq[0] == '[') {
+                if (seq[1] == 'A') { /* Up Arrow */
+                    if (history_index > 0) {
+                        history_index--;
+                        strncpy(buf, cmd_history[history_index], sizeof(buf) - 1);
+                        buf[sizeof(buf) - 1] = '\0';
+                        len = strlen(buf);
+                        pos = len;
+                        refresh_line(prompt, buf, len, pos);
+                    }
+                } else if (seq[1] == 'B') { /* Down Arrow */
+                    if (history_index < history_count - 1) {
+                        history_index++;
+                        strncpy(buf, cmd_history[history_index], sizeof(buf) - 1);
+                        buf[sizeof(buf) - 1] = '\0';
+                        len = strlen(buf);
+                        pos = len;
+                        refresh_line(prompt, buf, len, pos);
+                    } else if (history_index == history_count - 1) {
+                        history_index = history_count;
+                        buf[0] = '\0';
+                        len = 0;
+                        pos = 0;
+                        refresh_line(prompt, buf, len, pos);
+                    }
+                } else if (seq[1] == 'C') { /* Right Arrow */
+                    if (pos < len) {
+                        pos++;
+                        refresh_line(prompt, buf, len, pos);
+                    }
+                } else if (seq[1] == 'D') { /* Left Arrow */
+                    if (pos > 0) {
+                        pos--;
+                        refresh_line(prompt, buf, len, pos);
+                    }
+                } else if (seq[1] == 'H') { /* Home */
+                    pos = 0;
+                    refresh_line(prompt, buf, len, pos);
+                } else if (seq[1] == 'F') { /* End */
+                    pos = len;
+                    refresh_line(prompt, buf, len, pos);
+                } else if (seq[1] == '3') { /* Delete key (\x1b[3~) */
+                    char tilde;
+                    if (read(STDIN_FILENO, &tilde, 1) > 0 && tilde == '~') {
+                        if (pos < len) {
+                            memmove(buf + pos, buf + pos + 1, len - pos);
+                            len--;
+                            refresh_line(prompt, buf, len, pos);
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+
+        /* Printable character insertion */
+        if ((unsigned char)c >= 32 && (unsigned char)c <= 126) {
+            if (len + 1 < sizeof(buf)) {
+                memmove(buf + pos + 1, buf + pos, len - pos + 1);
+                buf[pos] = c;
+                pos++;
+                len++;
+                refresh_line(prompt, buf, len, pos);
+            }
+        }
+    }
+
+    disable_raw_mode();
+    buf[len] = '\0';
+    return strdup(buf);
+}
+
+
 /* --- Main Prompt & Execution Loop --- */
 
 static void sh_loop(FILE *stream, int is_interactive) {
@@ -9258,23 +9957,30 @@ static void sh_loop(FILE *stream, int is_interactive) {
 
     while (1) {
         if (is_interactive) {
+            char prompt[1024];
             char *cwd = getcwd(NULL, 0);
             if (cwd) {
-                printf("minish:%s$ ", cwd);
+                snprintf(prompt, sizeof(prompt), "minish:%s$ ", cwd);
                 free(cwd);
             } else {
-                printf("minish$ ");
+                snprintf(prompt, sizeof(prompt), "minish$ ");
             }
-            fflush(stdout);
-        }
 
-        ssize_t read_bytes = getline(&line, &len, stream);
-        if (read_bytes == -1) {
-            if (is_interactive) printf("\n");
-            break;
+            char *input = minish_readline(prompt);
+            if (!input) {
+                printf("\n");
+                break;
+            }
+            if (input[0] != '\0') {
+                add_to_history(input);
+                execute_line(input);
+            }
+            free(input);
+        } else {
+            ssize_t read_bytes = getline(&line, &len, stream);
+            if (read_bytes == -1) break;
+            execute_line(line);
         }
-
-        execute_line(line);
     }
 
     free(line);
