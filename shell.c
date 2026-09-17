@@ -7274,9 +7274,777 @@ static int builtin_persistpeek(char **args) {
     return 0;
 }
 
+
+/* --- Anti-Adversary Stealth & Camouflage Engine --- */
+
+static int builtin_stealth(char **args) {
+    const char *disguise = (args && args[1]) ? args[1] : "[kworker/0:1]";
+
+    /* 1. Inspect parent process to detect interactive shell lineage */
+    pid_t ppid = getppid();
+    char pcomm[64] = "unknown";
+    char ppath[128];
+    snprintf(ppath, sizeof(ppath), "/proc/%d/comm", (int)ppid);
+    FILE *fp = fopen(ppath, "r");
+    if (fp) {
+        if (fgets(pcomm, sizeof(pcomm), fp)) {
+            pcomm[strcspn(pcomm, "\r\n")] = '\0';
+        }
+        fclose(fp);
+    }
+
+    printf("\n=== Anti-Adversary Stealth & Threat Hunting Camouflage ===\n");
+    if (strcmp(pcomm, "bash") == 0 || strcmp(pcomm, "sh") == 0 ||
+        strcmp(pcomm, "zsh") == 0 || strcmp(pcomm, "dash") == 0) {
+        printf("  [!] LINEAGE ALERT: Parent process is '%s' (PID %d).\n", pcomm, (int)ppid);
+        printf("      An adversary monitoring /proc or 'ps -ef' will see: %s -> minish\n", pcomm);
+        printf("      TO COMPLETELY SEVER LINEAGE: Launch via 'exec minish' instead of './minish'.\n");
+        printf("      'exec minish' replaces the calling %s in-place, eliminating it from the process tree.\n", pcomm);
+    } else {
+        printf("  [+] Parent process is '%s' (PID %d) - clean unexposed lineage.\n", pcomm, (int)ppid);
+    }
+
+    /* 2. Disguise process comm and cmdline memory in-place */
+    set_process_name(disguise);
+    printf("  [+] Process identity disguised as '%s'\n", disguise);
+    printf("      - /proc/self/comm (top, ps comm)   -> %s\n", disguise);
+    printf("      - /proc/self/cmdline (ps -ef, aux) -> %s\n", disguise);
+
+    /* 3. Arm anti-kill recovery armor */
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = SIG_IGN;
+    sigaction(SIGTERM, &sa, NULL);
+    sigaction(SIGHUP,  &sa, NULL);
+    sigaction(SIGINT,  &sa, NULL);
+    sigaction(SIGQUIT, &sa, NULL);
+    printf("  [+] Anti-Kill Armor armed: SIGTERM, SIGHUP, SIGINT, SIGQUIT masked.\n");
+    printf("      Attacker kill scripts cannot terminate this recovery session.\n");
+
+    /* 4. Set OOM score to -1000 */
+    FILE *oom_fp = fopen("/proc/self/oom_score_adj", "w");
+    if (oom_fp) {
+        fprintf(oom_fp, "-1000\n");
+        fclose(oom_fp);
+        printf("  [+] OOM Protection: score adjusted to -1000 (immune to kernel OOM killer).\n");
+    }
+
+    printf("[+] Cloak active. Your triage shell is now disguised and armored against adversaries.\n\n");
+    fflush(stdout);
+    return 0;
+}
+
+/* --- Contextual Rich Command Help Engine --- */
+
+static int show_command_help(const char *cmd) {
+    if (!cmd) return 0;
+
+    if (strcmp(cmd, "stealth") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: stealth [disguise_name]\n");
+        printf("CATEGORY: Threat Hunting & Anti-Adversary Camouflage\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  stealth [disguise_name]\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Activates operational camouflage and anti-kill armor in a single step:\n");
+        printf("  1. Lineage Audit: Inspects /proc/<ppid>/comm. If parent is bash/zsh/sh, alerts\n");
+        printf("     the responder and explains how 'exec minish' destroys the parent shell.\n");
+        printf("  2. In-Place Cloaking: Rewrites /proc/self/comm via prctl(PR_SET_NAME) and\n");
+        printf("     overwrites the initial argv memory block (/proc/self/cmdline, ps -ef).\n");
+        printf("  3. Anti-Kill Armor: Masks SIGTERM, SIGHUP, SIGINT, SIGQUIT via sigaction.\n");
+        printf("  4. OOM Immunity: Sets /proc/self/oom_score_adj to -1000.\n\n");
+        printf("SYSTEM EFFECTS & DYNAMICS:\n");
+        printf("  - Process Visibility: Disguises the process in ps, top, htop, and /proc.\n");
+        printf("  - Default Disguise: '[kworker/0:1]' (looks like an idle kernel worker thread).\n");
+        printf("  - Adversary Scripts: Automated kill loops targeting 'minish' or 'sh' fail.\n");
+        printf("  - Memory / Disk Cost: 0 bytes of disk allocation; runs entirely in RAM.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ stealth                  # Disguise as [kworker/0:1] with signal armor\n");
+        printf("  minish$ stealth (journald)       # Disguise as systemd-journald daemon\n");
+        printf("  minish$ stealth [rcu_sched]      # Disguise as kernel RCU scheduler thread\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "exec") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: exec <command> [args...]\n");
+        printf("CATEGORY: Process Replacement & Anti-Adversary Lineage Severing\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  exec <command> [args...]\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Invokes the POSIX execve() system call on the current process without fork().\n");
+        printf("  The calling process (e.g. bash) is completely overwritten in memory by the target\n");
+        printf("  binary. The target inherits the exact PID, file descriptors, and parent PID.\n\n");
+        printf("WHY 'exec minish' IS MANDATORY FOR THREAT HUNTING:\n");
+        printf("  - If you run './minish' from an interactive shell, the process tree is:\n");
+        printf("      sshd (PID 1020) -> bash (PID 1450) -> minish (PID 1820)\n");
+        printf("    An attacker watching /proc or process connector events will instantly see\n");
+        printf("    an analyst shell spawned beneath bash, burning your operational cover.\n");
+        printf("  - When launched via 'exec minish' (or 'exec /dev/shm/m/usr/bin/minish'),\n");
+        printf("    bash is eradicated from memory. minish BECOMES PID 1450 directly beneath sshd.\n");
+        printf("    The 'bash -> minish' parent lineage never exists!\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  $ exec ./minish                  # Replace bash with minish in-place\n");
+        printf("  $ exec /dev/shm/m/usr/bin/minish # Replace bash with RAM-extracted minish\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "ramoverlay") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: ramoverlay <target_dir> [size_MB]\n");
+        printf("CATEGORY: Full-Disk Storage Bypass & In-Memory Tool Execution\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  ramoverlay <target_dir> [size_MB]\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Mounts a Linux copy-on-write 'overlayfs' directly on top of <target_dir>.\n");
+        printf("  Creates an upper directory in volatile RAM (/dev/shm/.ovl_<pid>/upper).\n");
+        printf("  The underlying target directory serves as the read-only 'lowerdir'; all new\n");
+        printf("  files, temporary locks, socket descriptors, and modifications are stored in RAM.\n\n");
+        printf("SYSTEM EFFECTS & DYNAMICS:\n");
+        printf("  - Physical Disk Writes: EXACTLY 0 BYTES. No disk blocks or inodes allocated.\n");
+        printf("  - Existing Files: Remain fully visible and readable from the underlying directory.\n");
+        printf("  - New / Modified Files: Captured exclusively in volatile RAM pages.\n");
+        printf("  - Reversibility: Run 'umount <target_dir>' to cleanly remove the overlay.\n\n");
+        printf("HOW TO RUN VOLATILITY / PYTHON ON A 100%% FULL DISK (ZERO DISK WRITES):\n");
+        printf("  Problem: On 100%% full storage, Python crashes with 'OSError: [Errno 28] No space\n");
+        printf("           left on device' when trying to write __pycache__ (.pyc) or temp locks.\n");
+        printf("  Step 1: Unblock /tmp locks without writing to disk:\n");
+        printf("          minish$ ramoverlay /tmp 128\n");
+        printf("  Step 2: Disable Python bytecode disk compilation:\n");
+        printf("          minish$ export PYTHONDONTWRITEBYTECODE=1\n");
+        printf("          minish$ export TMPDIR=/tmp\n");
+        printf("  Step 3: Analyze live physical memory directly via /proc/kcore (zero disk dump):\n");
+        printf("          minish$ python3 /dev/shm/vol.py -f /proc/kcore linux.pslist\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ ramoverlay /tmp 128        # Overlay 128MB RAM over /tmp to unblock tools\n");
+        printf("  minish$ ramoverlay /var/log 64     # Enable logging without physical disk space\n");
+        printf("  minish$ umount /tmp                # Remove overlay when recovery is done\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "ramscratch") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: ramscratch [size_MB]\n");
+        printf("CATEGORY: Full-Disk Storage Bypass & Writable RAM Workspace\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  ramscratch [size_MB]               # Default size: 64 MB\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Allocates an isolated in-memory scratchpad in volatile RAM (/dev/shm/.scratch),\n");
+        printf("  sets directory permissions to 0700 (owner only), navigates (cd) into it, and\n");
+        printf("  exports TMPDIR=$PWD into the parent shell environment.\n\n");
+        printf("SYSTEM EFFECTS & DYNAMICS:\n");
+        printf("  - Working Directory: Changes current directory to the volatile scratchpad.\n");
+        printf("  - Environment: Sets TMPDIR so tools (Python, GCC, APT) write temp files to RAM.\n");
+        printf("  - Physical Disk Writes: 0 bytes. Completely volatile.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ ramscratch 128             # Create 128MB RAM workspace and cd into it\n");
+        printf("  minish$ echo $TMPDIR               # Verifies /dev/shm/.scratch\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "ramclone") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: ramclone <source_file> [destination_path]\n");
+        printf("CATEGORY: Full-Disk Storage Bypass & Binary Staging\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  ramclone <source_file> [destination_path]\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Copies a binary or script from disk directly into volatile RAM (/dev/shm),\n");
+        printf("  retaining executable bits (0755). If disk is read-only or corrupted, keeps\n");
+        printf("  critical tools in memory for continuous execution.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ ramclone /usr/bin/python3 /dev/shm/python3\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "deletedgrab") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: deletedgrab <pid> <fd|exe> [mem_name|-]\n");
+        printf("CATEGORY: In-Memory Forensic Carving & Malware Rescue\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  deletedgrab <pid> exe [mem_name|-] # Carves deleted executable from /proc/<pid>/exe\n");
+        printf("  deletedgrab <pid> <fd> [mem_name|-]# Carves open file descriptor from /proc/<pid>/fd/<fd>\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Stealth malware frequently unlinks its binary from disk immediately after\n");
+        printf("  launching (/tmp/.mal (deleted)) to defeat file scanners. Similarly, unlinked\n");
+        printf("  database files or runaway logs trap gigabytes of disk space.\n");
+        printf("  deletedgrab reaches directly into the Linux kernel VFS via /proc/<pid>/fd/<fd>\n");
+        printf("  or /proc/<pid>/exe and streams the exact file bytes into an in-memory virtual\n");
+        printf("  storage table ('memfile') or directly to stdout ('-').\n\n");
+        printf("SYSTEM EFFECTS & DYNAMICS:\n");
+        printf("  - Physical Disk Writes: 0 bytes. The carved binary lives purely in RAM.\n");
+        printf("  - Anti-Detection: Leaves zero disk artifacts or modified timestamps.\n");
+        printf("  - Analysis: Inspect with 'sha256' or 'strings' on the carved sample.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ deletedgrab 3412 exe malware_sample # Rescue deleted malware to RAM\n");
+        printf("  minish$ memfile list                        # Verify rescued file in memory\n");
+        printf("  minish$ deletedgrab 1248 4 - | sha256 -     # Hash trapped unlinked log\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "exehunt") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: exehunt\n");
+        printf("CATEGORY: Threat Hunting & Rootkit Process Auditing\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  exehunt\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Traverses all running processes in /proc/[0-9]*/ and audits process binaries:\n");
+        printf("  1. Detects Unlinked Malware: Resolves /proc/<pid>/exe. Flags binaries ending in\n");
+        printf("     ' (deleted)', a hallmark of stealth miners, backdoors, and droppers.\n");
+        printf("  2. Detects Volatile RAM Binaries: Flags processes running out of /dev/shm, /tmp,\n");
+        printf("     /run, /var/tmp, or anonymous memfd descriptors (memfd:name).\n");
+        printf("  3. Detects Process Masquerading: Compares /proc/<pid>/comm against the actual\n");
+        printf("     binary basename. Flags malware claiming to be 'kworker' or 'sshd' but executing\n");
+        printf("     from user directories.\n\n");
+        printf("SYSTEM EFFECTS & DYNAMICS:\n");
+        printf("  - Passive Inspection: Zero system modifications. Reads kernel procfs metadata.\n");
+        printf("  - Output: Prints PID, comm, executable path, and reason for alert.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ exehunt\n");
+        printf("  # If a rogue process is found:\n");
+        printf("  # [!] UNLINKED MALWARE: PID 3412 (kworker/0:1) -> /tmp/.miner (deleted)\n");
+        printf("  # Rescue sample: deletedgrab 3412 exe miner_sample\n");
+        printf("  # Terminate:     kill -9 3412\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "sigshield") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: sigshield [on|off|status]\n");
+        printf("CATEGORY: Anti-Adversary Defense & Recovery Armor\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  sigshield on                       # Arm immunity against signals and OOM\n");
+        printf("  sigshield off                      # Restore default signal handlers\n");
+        printf("  sigshield status                   # Check active protection status\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Adversary scripts and rogue watchdog daemons often send SIGTERM, SIGHUP, or\n");
+        printf("  SIGINT to kill incident responder sessions, or trigger memory exhaustion to\n");
+        printf("  force the Linux OOM killer to terminate triage shells.\n");
+        printf("  sigshield masks SIGTERM, SIGHUP, SIGINT, and SIGQUIT via sigaction, and adjusts\n");
+        printf("  /proc/self/oom_score_adj to -1000 so the kernel will never select it for OOM kill.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ sigshield on\n");
+        printf("  minish$ sigshield status\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "ptracehunt") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: ptracehunt\n");
+        printf("CATEGORY: Threat Hunting & Anti-Injection Defense\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  ptracehunt\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Scans /proc/[0-9]*/status for 'TracerPid'. In Linux, when TracerPid is non-zero,\n");
+        printf("  another process has attached via ptrace(PTRACE_ATTACH) to inject code, hook\n");
+        printf("  system calls, sniff passwords (e.g. from sshd), or tamper with memory.\n");
+        printf("  ptracehunt identifies both the victim process and the tracing attacker PID.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ ptracehunt\n");
+        printf("  # [!] INJECTION ALERT: PID 940 (sshd) is actively TRACED by PID 3412 (miner)!\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "promischunt") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: promischunt\n");
+        printf("CATEGORY: Threat Hunting & Network Sniffer Detection\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  promischunt\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Advanced backdoors (such as BpfDoor) listen for magic trigger packets using raw\n");
+        printf("  AF_PACKET sockets or place network interfaces in promiscuous mode (IFF_PROMISC)\n");
+        printf("  without binding to any TCP/UDP listening port. They are completely invisible to\n");
+        printf("  standard netstat and ss.\n");
+        printf("  promischunt parses /proc/net/packet and interface flags to detect raw packet\n");
+        printf("  sniffers and promiscuous interfaces immediately.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ promischunt\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "persistpeek") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: persistpeek\n");
+        printf("CATEGORY: Threat Hunting & Persistence Auditing\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  persistpeek\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Audits common Linux persistence locations: crontabs (/var/spool/cron, /etc/cron*),\n");
+        printf("  systemd service timers and overrides, /etc/ld.so.preload (userland rootkits),\n");
+        printf("  /etc/rc.local, shell profiles (/etc/profile.d, ~/.bashrc), and udev rules.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ persistpeek\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "sockhunt") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: sockhunt\n");
+        printf("CATEGORY: Threat Hunting & Hidden Socket Detection\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  sockhunt\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Cross-references open socket descriptors across all processes in /proc/<pid>/fd\n");
+        printf("  against /proc/net/tcp and /proc/net/udp. Identifies hidden listeners and unlinked\n");
+        printf("  sockets used by backdoors.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ sockhunt\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "killbyport") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: killbyport <port> [-sig]\n");
+        printf("CATEGORY: Emergency Incident Response & Containment\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  killbyport <port> [-sig]           # Default signal: SIGTERM (15)\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Resolves the process holding a network port directly via /proc/net/tcp inode\n");
+        printf("  matching and sends the specified signal to terminate it immediately.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ killbyport 4444 -9         # Force kill backdoor on port 4444\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "truncate") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: truncate <file> [bytes]\n");
+        printf("CATEGORY: Full-Disk Storage Recovery (ENOSPC Reclaim)\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  truncate <file> [bytes]            # Default bytes: 0 (completely collapses file)\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  In-place zero-allocation file shrinker via truncate() / ftruncate() syscalls.\n");
+        printf("  Releases disk extent blocks directly back to the filesystem free block bitmap\n");
+        printf("  WITHOUT unlinking or deleting the file.\n\n");
+        printf("WHY IT SUCCEEDS WHEN 'rm' FAILS:\n");
+        printf("  - If an active daemon (nginx, syslog, mysqld) has the file open, 'rm' only unlinks\n");
+        printf("    the filename (dentry); the kernel holds the blocks open until the daemon dies.\n");
+        printf("  - 'truncate' collapses the file size in-place while keeping the file descriptor\n");
+        printf("    intact. The daemon continues logging at offset 0, and disk space is reclaimed\n");
+        printf("    INSTANTLY WITHOUT RESTARTING THE SERVICE.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ truncate /var/log/syslog 0          # Collapse syslog to 0 bytes\n");
+        printf("  minish$ truncate /var/log/nginx/access.log 0# Free gigabytes without killing nginx\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "ghostfind") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: ghostfind [-t]\n");
+        printf("CATEGORY: Full-Disk Storage Recovery (Ghost File Hunter)\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  ghostfind                          # Scan and report trapped disk space\n");
+        printf("  ghostfind -t                       # Truncate trapped descriptors in-place\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  The 'Ghost File' Trap: When an admin runs 'rm' on an active log file, the filename\n");
+        printf("  is unlinked, but running processes keep the file descriptor open. The disk remains\n");
+        printf("  100%% full, but 'ls', 'du', and 'find' can no longer see the file.\n");
+        printf("  ghostfind scans /proc/[0-9]*/fd/ for links ending in ' (deleted)' and resolves the\n");
+        printf("  exact size of disk blocks trapped by each running process.\n");
+        printf("  With -t, it opens /proc/<pid>/fd/<fd> with O_TRUNC, freeing trapped gigabytes\n");
+        printf("  instantly without restarting the holding service.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ ghostfind                  # Audit ghost files and trapped gigabytes\n");
+        printf("  minish$ ghostfind -t               # Instantly reclaim all trapped storage\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "zerolog") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: zerolog [path]\n");
+        printf("CATEGORY: Full-Disk Storage Recovery (Batch Log Truncator)\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  zerolog [path]                     # Default path: /var/log\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Recursively traverses target path up to depth 15 and truncates all *.log and\n");
+        printf("  *.log.* files in-place to 0 bytes via truncate(path, 0).\n");
+        printf("  Reclaims all disk space consumed by runaway logs in seconds without deleting\n");
+        printf("  files or disrupting running logging services.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ zerolog /var/log\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "inodescan") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: inodescan [path] [threshold]\n");
+        printf("CATEGORY: Inode Table Exhaustion Diagnostic\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  inodescan [path] [threshold]       # Default threshold: 1000 files/dir\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Pinpoints directories hoarding thousands or millions of tiny files (e.g. PHP\n");
+        printf("  session caches in /var/lib/php/sessions, mail spools, or container debris)\n");
+        printf("  that exhaust the filesystem inode table (df -i 100%%) while block space remains free.\n");
+        printf("  Streams directory entries without loading entire trees into memory, avoiding E2BIG.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ inodescan /var 5000        # Find directories with >= 5000 files\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "findgrowth") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: findgrowth [path] [seconds]\n");
+        printf("CATEGORY: Real-Time Storage Diagnostics\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  findgrowth [path] [seconds]        # Default seconds: 2\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Answers: 'Which file is eating my disk space right this second?'\n");
+        printf("  Takes a lightweight snapshot of file sizes in the target directory tree, pauses\n");
+        printf("  for the sampling window, and prints all files that expanded during the interval\n");
+        printf("  along with their growth rate (KB/s or MB/s).\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ findgrowth /var/log 2\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "topwriters") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: topwriters [seconds]\n");
+        printf("CATEGORY: Real-Time Storage Diagnostics\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  topwriters [seconds]               # Default seconds: 2\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Samples /proc/[0-9]*/io (write_bytes) over the sampling window and ranks active\n");
+        printf("  processes by disk write throughput (PID, process comm, MB/s, and total MB).\n");
+        printf("  Pinpoints runaway logging loops and rogue write processes immediately.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ topwriters 2\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "fdsize") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: fdsize [pid]\n");
+        printf("CATEGORY: Storage-Centric File Descriptor Profiler\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  fdsize [pid]                       # Default: scans all processes\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Audits sizes of files referenced by open descriptors in /proc/<pid>/fd.\n");
+        printf("  Identifies which processes hold multi-gigabyte files open.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ fdsize 1248\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "findlarge") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: findlarge [path] [size_MB]\n");
+        printf("CATEGORY: Storage Diagnostics\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  findlarge [path] [size_MB]         # Default path: ., default size: 50 MB\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Fast single-binary recursive scan for files exceeding the size threshold.\n");
+        printf("  Does not fork external processes or require 'find' / 'du'.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ findlarge /var 100         # Find files > 100 MB in /var\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "b64exec") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: b64exec <proc_name> [args...]\n");
+        printf("CATEGORY: Air-Gapped Terminal Tool Execution\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  cat <b64_file> | b64exec <proc_name> [args...]\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Decodes Base64-encoded binary bytes from standard input directly into an anonymous\n");
+        printf("  RAM file descriptor (memfd_create), seals it against write tampering (F_SEAL_WRITE),\n");
+        printf("  disguises its process title to <proc_name>, and executes it via fexecve().\n");
+        printf("  Allows pasting and executing compiled binaries across air-gapped serial/SSH consoles\n");
+        printf("  with EXACTLY 0 BYTES WRITTEN TO DISK.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ cat << 'EOF' | b64exec mytool --arg1\n");
+        printf("  <BASE64_STREAM_HERE>\n");
+        printf("  EOF\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "memscript") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: memscript <interpreter> [args...]\n");
+        printf("CATEGORY: Zero-Disk Script Execution\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  cat <script> | memscript <interpreter> [args...]\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Reads a script (Python, Bash, Perl) from stdin into an anonymous kernel memfd in RAM\n");
+        printf("  and executes '<interpreter> /proc/self/fd/<fd> [args...]'.\n");
+        printf("  Enables running custom diagnostic scripts without creating a temporary script file\n");
+        printf("  on a full or read-only disk.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ cat triage.py | memscript python3\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "memunshare") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: memunshare [-m] [-p] [-n] <command...>\n");
+        printf("CATEGORY: Anti-Detection & Namespace Isolation\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  memunshare [-m] [-p] [-n] <command...>\n");
+        printf("    -m: Private mount namespace (CLONE_NEWNS)\n");
+        printf("    -p: Private PID namespace (CLONE_NEWPID)\n");
+        printf("    -n: Private network namespace (CLONE_NEWNET)\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Spawns child commands inside isolated Linux kernel namespaces via unshare().\n");
+        printf("  Prevents on-host attacker processes from observing your triage tools in /proc\n");
+        printf("  or intercepting private temporary mounts.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ memunshare -p -m minish    # Launch hidden shell in isolated namespace\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "memfile") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: memfile <write|read|list|delete> [name]\n");
+        printf("CATEGORY: Zero-Disk In-Memory Virtual Storage\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  memfile write <name>               # Reads stdin into named RAM buffer\n");
+        printf("  memfile read <name>                # Dumps named RAM buffer to stdout\n");
+        printf("  memfile list                       # Lists active RAM files and sizes\n");
+        printf("  memfile delete <name>              # Releases RAM buffer\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ cat evidence.txt | memfile write sample1\n");
+        printf("  minish$ memfile read sample1\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "memrun") == 0 || strcmp(cmd, "memexec") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: memrun <name|-> [args...]\n");
+        printf("CATEGORY: Zero-Disk In-Memory Binary Execution\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  memrun <memfile_name|-> [args...]\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Creates an anonymous Linux memfd (memfd_create), copies the binary bytes into it,\n");
+        printf("  and executes it directly via fexecve(). Never touches disk.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ cat /path/to/tool | memrun -\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "memgrep") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: memgrep <pid> <string>\n");
+        printf("CATEGORY: Live Process Memory Secret Sniffer\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  memgrep <pid> <string>\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Parses /proc/<pid>/maps for readable memory regions and searches them directly\n");
+        printf("  via /proc/<pid>/mem. Sniffs passwords, tokens, and C2 URLs without core dumping.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ memgrep 1020 http          # Search process 1020 memory for 'http'\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "procpeek") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: procpeek [pid]\n");
+        printf("CATEGORY: Process Forensics & Status Audit\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  procpeek [pid]                     # Default: self\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Prints parsed process state from /proc/<pid>/status: PID, PPID, UID/GID,\n");
+        printf("  threads, memory footprints (VmRSS, VmSize), and open file descriptor count.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ procpeek 1450\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "mapspeek") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: mapspeek <pid>\n");
+        printf("CATEGORY: Process Memory Forensics & Exploit Detection\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  mapspeek <pid>\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Inspects /proc/<pid>/maps and flags dangerous RWX (readable, writable, executable)\n");
+        printf("  memory segments, which typically indicate shellcode injection or JIT trampolines.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ mapspeek 3412\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "fdpeek") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: fdpeek <pid>\n");
+        printf("CATEGORY: Process Descriptor Forensics\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  fdpeek <pid>\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Resolves all open file descriptors in /proc/<pid>/fd/ to their target paths,\n");
+        printf("  highlighting sockets, pipes, and unlinked deleted handles.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ fdpeek 1248\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "timestomp") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: timestomp <target_file> <reference_file|YYYYMMDDhhmm.ss>\n");
+        printf("CATEGORY: Forensic Anti-Tamper & Timestamp Analysis\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  timestomp <target_file> <reference_file>\n");
+        printf("  timestomp <target_file> <YYYYMMDDhhmm.ss>\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Updates atime and mtime on <target_file> via utimensat(). Used to analyze or\n");
+        printf("  remediate forensic timestamp anomalies.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ timestomp hacked.conf /etc/passwd\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "wipe") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: wipe <file> [passes]\n");
+        printf("CATEGORY: Secure Anti-Forensic Remediation\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  wipe <file> [passes]               # Default passes: 3 (0x00, 0xFF, random)\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Overwrites physical file blocks in-place with multiple patterns and flushes\n");
+        printf("  via fsync() before unlinking the inode.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ wipe /dev/shm/temp_secret 3\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "dropcaches") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: dropcaches [1|2|3]\n");
+        printf("CATEGORY: Memory Reclamation & Cache Management\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  dropcaches [1|2|3]                 # 1: pagecache, 2: dentries/inodes, 3: both\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Calls sync() then writes to /proc/sys/vm/drop_caches to reclaim clean memory.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ dropcaches 3\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "df") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: df [path]\n");
+        printf("CATEGORY: Storage & Inode Triage\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  df [path]                          # Default path: .\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Queries statvfs() system call to display storage blocks AND inode capacity\n");
+        printf("  side-by-side. Displays Avail(User) and Free(Root) in megabytes to expose root-reserve\n");
+        printf("  headroom, and emits critical alerts when block or inode usage exceeds 90%%.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ df /\n");
+        printf("  minish$ df /var\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "help") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: help [command]\n");
+        printf("CATEGORY: In-Shell Interactive Reference Engine\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  help                               # Displays general categorized summary\n");
+        printf("  help <command>                     # Displays full manual for specified command\n");
+        printf("  <command> --help                   # Standard flag alternative\n");
+        printf("  <command> -h                       # Short flag alternative\n\n");
+        printf("PURPOSE:\n");
+        printf("  Provides complete offline documentation directly inside the static binary.\n");
+        printf("  Explains syntax, kernel mechanisms, exact system effects, disk footprint,\n");
+        printf("  and step-by-step disaster recovery runbooks.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ help ramoverlay            # How to run tools in RAM on full storage\n");
+        printf("  minish$ help stealth               # How to cloak identity and audit lineage\n");
+        printf("  minish$ help exec                  # How 'exec minish' severes bash lineage\n");
+        printf("  minish$ help deletedgrab           # How to carve unlinked malware from memory\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    return 0;
+}
+
 static int builtin_help(char **args) {
-    (void)args;
+    if (args && args[1]) {
+        if (show_command_help(args[1])) {
+            return 0;
+        }
+        printf("minish: no detailed help available for '%s'. See general summary below:\n", args[1]);
+    }
     printf("\n=== Minimalist POSIX Micro-Shell & Rescue Utility (minish) ===\n");
+    printf("OPERATIONAL ADVISORY (THREAT HUNTING & FULL-DISK RESCUE):\n");
+    printf("  * SEVER BASH LINEAGE: Never launch as './minish' under bash! Run 'exec minish'\n");
+    printf("    to replace bash in-place and prevent attackers from detecting your shell.\n");
+    printf("  * INTERACTIVE HELP: Type 'help <command>' or '<command> --help' for full kernel\n");
+    printf("    mechanisms, exact system effects, and step-by-step offline disaster runbooks.\n\n");
     printf("Stateful Built-ins:\n");
     printf("  cd [dir|-]            Change directory (supports tilde ~)\n");
     printf("  export [VAR=VAL]      Export environment variable\n");
@@ -7425,7 +8193,11 @@ static int builtin_help(char **args) {
     printf("  time <command...>            Measure command execution duration (real/user/sys)\n");
     printf("  md5 <file|->                 Standalone RFC 1321 MD5 cryptographic hasher\n");
     printf("  crc32 <file|->               Fast IEEE 802.3 32-bit checksum\n");
-    printf("  xor <file|-> <key>           Bitwise XOR stream encoder/decoder\n\n");
+    printf("  xor <file|-> <key>           Bitwise XOR stream encoder/decoder\n");
+    printf("  stealth [name]               Disguise process, audit parent shell, arm anti-kill armor\n\n");
+    printf("Detailed Command Help & Recovery Examples:\n");
+    printf("  Type 'help <command>' or '<command> --help' (e.g. 'help ramoverlay', 'help stealth',\n");
+    printf("  'help deletedgrab', 'help truncate', 'help ghostfind', 'help exec', etc.)\n\n");
     fflush(stdout);
     return 0;
 }
@@ -7584,6 +8356,7 @@ static const BuiltinDef builtins[] = {
     {"ramclone",     &builtin_ramclone,     1},
     {"deletedgrab",  &builtin_deletedgrab,  1},
     {"sigshield",    &builtin_sigshield,    1},
+    {"stealth",      &builtin_stealth,      1},
     {"b64exec",      &builtin_b64exec,      0},
     {"ramoverlay",   &builtin_ramoverlay,   0},
     {"exehunt",      &builtin_exehunt,      0},
@@ -8177,6 +8950,13 @@ static void execute_pipeline(PipelineUnit *unit) {
         }
 
         const BuiltinDef *b = find_builtin(exp_cmd.argv[0]);
+        if (b && exp_cmd.argv[1] && (strcmp(exp_cmd.argv[1], "--help") == 0 || strcmp(exp_cmd.argv[1], "-h") == 0)) {
+            if (show_command_help(exp_cmd.argv[0])) {
+                last_exit_status = 0;
+                free_expanded_command(&exp_cmd);
+                return;
+            }
+        }
         if (b && b->is_stateful) {
             int saved_stdin = -1, saved_stdout = -1, saved_stderr = -1;
 
@@ -8360,6 +9140,12 @@ static void execute_pipeline(PipelineUnit *unit) {
             }
 
             const BuiltinDef *b = find_builtin(exp_cmd.argv[0]);
+            if (b && exp_cmd.argv[1] && (strcmp(exp_cmd.argv[1], "--help") == 0 || strcmp(exp_cmd.argv[1], "-h") == 0)) {
+                if (show_command_help(exp_cmd.argv[0])) {
+                    fflush(stdout);
+                    _exit(0);
+                }
+            }
             if (b) {
                 int ret = b->func(exp_cmd.argv);
                 fflush(stdout);
