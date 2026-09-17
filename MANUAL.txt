@@ -1599,6 +1599,175 @@ In Normal mode, enter command prompt with `:`:
 - `:x` or `:wq` — Commits buffer to disk and exits in one step.
 
 
+### Runbook R: Field Incident Response Playbook (Ubuntu Initial Setup, Stealth Operation & Immediate Adversary Triage)
+
+This playbook provides a rapid, battle-tested procedure for incident responders deploying `minish` onto a suspected compromised Ubuntu host. It covers initial zero-trace setup, process camouflage to evade attacker monitoring, asynchronous job detachment, and an immediate 60-second triage workflow to discover hidden rootkits and anomalous activity.
+
+---
+
+#### Step 1: Initial Setup on Ubuntu & Severing Shell Lineage
+When dropping onto a live host, attackers often log shell commands or inspect `ps -ef` / `pstree` for monitoring or response activity.
+
+1. **Deploy Binary (Offline / Zero-Dependency)**:
+   - **Option A (System `.deb` Package)**:
+     ```bash
+     sudo dpkg -i minish_1.0.0_amd64.deb
+     ```
+   - **Option B (Direct Static Binary Drop)**:
+     ```bash
+     chmod +x minish
+     ```
+
+2. **Sever Parent Shell Lineage with `exec`**:
+   *CRITICAL OPERATIONAL RULE:* Never launch `minish` as a child process (e.g. `./minish`) from within `bash` or `sh`. An adversary inspecting process trees will see `bash -> minish` or `sshd -> bash -> minish`.
+   Instead, execute `minish` using the shell's `exec` primitive:
+   ```bash
+   exec minish
+   ```
+   *Kernel Mechanism:* `exec` invokes `execve()` on the current process PID, replacing the running `bash` image in-place. The parent `bash` process is completely obliterated from `/proc` and `pstree`.
+
+3. **Verify Automatic Process Camouflage**:
+   By default, `minish` immediately overwrites its contiguous process stack arguments (`argv` and `environ`) and invokes `prctl(PR_SET_NAME, "-bash")` (or FreeBSD `setproctitle`).
+   To an adversary running `ps -ef | grep minish`, `ps aux`, or `top`, **zero instances of `minish` appear**:
+   ```text
+   root     4812  4810  0 13:00 pts/1    00:00:00 -bash
+   ```
+   To masquerade as a kernel thread or system daemon instead:
+   ```bash
+   exec minish -a "[kworker/u2:0]"
+   # or
+   exec minish -s "sshd: [priv]"
+   ```
+
+---
+
+#### Step 2: Arm Anti-Kill Defenses & Detach Background Jobs
+
+1. **Arm Anti-Kill Recovery Armor (`stealth` & `sigshield`)**:
+   Compromised hosts often run automated adversary watchdogs that spam `killall` or `pkill` across shells. Arm your session immediately:
+   ```bash
+   minish> stealth "[kworker/0:0]"
+   ```
+   *System Defenses Activated:*
+   - **Signal Shielding:** Masks `SIGTERM`, `SIGINT`, and `SIGQUIT`. Adversary kill scripts cannot terminate your session. (Note: `SIGHUP` remains active so closing your terminal window terminates cleanly without leaving orphans).
+   - **OOM Immunity:** Sets `/proc/self/oom_score_adj` to `-1000`, guaranteeing the Linux OOM-killer will never reap your shell during memory exhaustion.
+   - **Contiguous Buffer Masking:** Overwrites process title across all procfs interfaces.
+
+2. **Run Continuous Monitored Scanners in Detached Mode (`detach`)**:
+   Do not lock up your interactive terminal running forensic collectors. Detach them into background sessions with disassociated I/O:
+   ```bash
+   # Example A: Continuously monitor for runaway log or malware file expansion
+   minish> detach watch 5 findgrowth /var/log 5
+   [+] Detached Job [1] (PID: 4892) running: watch 5 findgrowth /var/log 5
+
+   # Example B: Run an intensive memory dump or disk carver in background
+   minish> detach ./volatility -f /dev/shm/mem.raw linux.pslist
+   [+] Detached Job [2] (PID: 4901) running: ./volatility -f /dev/shm/mem.raw linux.pslist
+   ```
+
+3. **Monitor, Reattach, or Stop Background Tasks**:
+   ```bash
+   # List active jobs:
+   minish> jobs
+   [1]  Running  PID: 4892  CMD: watch 5 findgrowth /var/log 5
+   [2]  Running  PID: 4901  CMD: ./volatility -f /dev/shm/mem.raw linux.pslist
+
+   # Reattach to inspect live output:
+   minish> attach 2
+
+   # Terminate runaway job (escalates from SIGTERM to SIGKILL):
+   minish> stop 1
+   ```
+
+4. **Disown Jobs to Persist Across Disconnects (`disown`)**:
+   If you need a collector or sniffer to continue gathering evidence even after you log out:
+   ```bash
+   minish> disown 2
+   [+] Disowned Job [2] (PID: 4901). Process will persist independently.
+   ```
+   *Effect:* Reparents the task under PID 1 (`init` / `systemd`), running as an independent daemon that survives terminal disconnects.
+
+---
+
+#### Step 3: Immediate 60-Second Adversary Triage Workflow
+
+Execute this native built-in sequence to detect live threats, rootkits, and unauthorized activity without touching the disk or alerting adversaries:
+
+1. **Spot Unlinked & Hidden In-Memory Malware (`exehunt`)**:
+   ```bash
+   minish> exehunt
+   ```
+   - Scans `/proc/*/exe` and `/proc/*/maps`.
+   - Instantly identifies processes running from deleted binaries (e.g. `/tmp/.miner (deleted)`), volatile memory paths (`/dev/shm`, `/memfd:`, `/tmp`), or processes with forged names.
+
+2. **Detect Active Process Injection & Ptrace Hooks (`ptracehunt`)**:
+   ```bash
+   minish> ptracehunt
+   ```
+   - Audits system daemons (`sshd`, `systemd`, `nginx`, `cron`).
+   - Identifies if an attacker process is using `ptrace(PTRACE_ATTACH)` to hook APIs, intercept credentials, or hide threads inside legitimate daemons.
+
+3. **Detect Portless Backdoors & Raw Packet Sniffers (`promischunt`)**:
+   ```bash
+   minish> promischunt
+   ```
+   - Inspects `/proc/net/packet` and interface flags.
+   - Detects raw `AF_PACKET` sockets (used by stealth backdoors like **BpfDoor**) and promiscuous interfaces sniffing internal network traffic.
+
+4. **Identify Rogue Listening Ports & Hidden Sockets (`sockstat` & `sockhunt`)**:
+   ```bash
+   # Check all active TCP/UDP sockets without netstat or ss:
+   minish> sockstat
+
+   # Pinpoint the exact PID, binary path, and command holding a suspicious port (e.g. 4444):
+   minish> sockhunt 4444
+   [!] Port 4444 held by PID 3412 (kworker/0:1) -> /tmp/.miner (deleted)
+   ```
+
+5. **Sniff In-Memory C2 Domains, Keys & Passwords (`memgrep`)**:
+   ```bash
+   minish> memgrep 3412 "http"
+   [0x00007ffdaf7c0968] ([heap]): http://198.51.100.24:8080/c2
+   ```
+   - Scans `/proc/[pid]/mem` live virtual memory segments without dumping the entire multi-gigabyte RAM space to disk.
+
+6. **Inspect Process Memory Maps for Shellcode Injection (`mapspeek`)**:
+   ```bash
+   minish> mapspeek 3412
+   ```
+   - Highlights anonymous memory regions marked **`rwxp`** (Read-Write-Execute)—the definitive hallmark of in-memory shellcode execution.
+
+7. **Audit Crontabs, Systemd Overrides & Profile Persistence (`persistpeek`)**:
+   ```bash
+   minish> persistpeek
+   ```
+   - Scans `/etc/cron*`, `/var/spool/cron/crontabs`, systemd unit drop-ins, and `/etc/profile.d/` for rogue startup hooks or backdoors.
+
+---
+
+#### Step 4: Containment & Evidence Preservation (Zero Disk Footprint)
+
+1. **Extract Deleted Malware Binaries Directly into RAM Virtual Storage (`deletedgrab`)**:
+   ```bash
+   minish> deletedgrab 3412 4
+   [+] Rescued /proc/3412/fd/4 into RAM storage as 'malware_sample' (45120 bytes)
+   ```
+   - Preserves the malware binary in volatile memory (`memfile`) for reverse engineering without writing files to physical disk (avoiding disk timestamp tampering and endpoint AV triggers).
+
+2. **Emergency Directory Lockdown Against Ransomware (`lockdown`)**:
+   ```bash
+   minish> lockdown /var/www
+   ```
+   - Directly issues `FS_IOC_SETFLAGS` to apply the immutable (`+i`) attribute recursively across directory trees, instantly preventing ransomware or attackers from modifying, encrypting, or truncating files.
+
+3. **Terminate the Adversary Process Hierarchy (`killtree`)**:
+   ```bash
+   minish> killtree 3412 -9
+   [+] Recursively terminated entire process tree for PID 3412
+   ```
+   - Destroys the process and all child threads/workers from leaves to root, preventing auto-respawn loops.
+
+
 ## 5. Packaging, UsrMerge & System Deployment
 
 `minish` is distributed as native standalone packages for major enterprise Linux distributions, strictly conforming to modern filesystem hierarchy standards.

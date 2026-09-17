@@ -269,6 +269,66 @@ A standalone, ultra-compact, POSIX-compliant emergency shell designed for system
 
 ## Top Disaster Recovery Recipes
 
+### Quickstart Playbook: Ubuntu Setup, Stealth Operation & Immediate Threat Triage
+
+Deploy onto a compromised or suspicious Ubuntu host, sever process lineage, evade attacker monitoring, and uncover anomalous activity in under 60 seconds:
+
+#### 1. Setup & Sever Shell Lineage (Zero-Trace Execution)
+```bash
+# Install .deb or drop static binary:
+sudo dpkg -i minish_1.0.0_amd64.deb || chmod +x minish
+
+# Sever bash parentage in-place (never run './minish' under bash!):
+exec minish
+```
+*Effect:* `exec` replaces the running `bash` process in-place at the same PID. `minish` automatically cloaks its process name in `ps -ef`, `ps aux`, and `top` to `-bash`. Attackers running `ps -ef | grep minish` see zero matching processes.
+
+#### 2. Arm Anti-Kill Defenses & Detach Background Collectors
+```bash
+# Arm anti-kill armor (masks SIGTERM/SIGINT/SIGQUIT and sets OOM score to -1000):
+minish$ stealth "[kworker/0:0]"
+
+# Detach long-running monitors into background sessions:
+minish$ detach watch 5 findgrowth /var/log 5
+[+] Detached Job [1] (PID: 4892) running: watch 5 findgrowth /var/log 5
+
+# Manage background jobs without losing terminal access:
+minish$ jobs
+minish$ attach 1    # Live output monitor
+minish$ stop 1      # Terminate runaway scanner
+minish$ disown 1    # Persist as independent daemon under PID 1 across disconnects
+```
+
+#### 3. 60-Second Threat Hunting Workflow
+```bash
+# 1. Spot unlinked malware binaries running in RAM (e.g. /tmp/.miner (deleted)):
+minish$ exehunt
+
+# 2. Detect live process injection or ptrace hooks across system daemons:
+minish$ ptracehunt
+
+# 3. Detect portless raw packet sniffers (BpfDoor / AF_PACKET) and promiscuous NICs:
+minish$ promischunt
+
+# 4. Check active sockets and pinpoint rogue listening processes:
+minish$ sockstat
+minish$ sockhunt 4444
+
+# 5. Sniff live process memory for C2 domains or encryption keys:
+minish$ memgrep 3412 "http"
+
+# 6. Audit crontabs, systemd overrides, and profile backdoors:
+minish$ persistpeek
+
+# 7. Rescue deleted malware binary directly out of RAM without touching disk:
+minish$ deletedgrab 3412 4
+
+# 8. Recursively lock down directory against ransomware (+i immutable):
+minish$ lockdown /var/www
+```
+
+---
+
 ### 1. Recover from 100% Full Disk (`ENOSPC`) Outages
 When disk space hits 0 bytes and files cannot be written or edited:
 ```bash
