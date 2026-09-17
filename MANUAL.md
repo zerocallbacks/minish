@@ -1896,3 +1896,83 @@ Inside this namespace, `minish` is registered as **PID 1**. If an adversary or s
 $ kill -9 1
 # Effect: Dropped by kernel. Process continues running unaffected!
 ```
+
+### 6.5 Operational Tradecraft: Defeating PID Heuristics & Behavioral Process Auditing
+
+Experienced threat actors and automated Endpoint Detection & Response (EDR) agents do not rely solely on process string names. They inspect **PID allocation chronology, PPID lineage, controlling terminals, and kernel thread flags**. Understanding these heuristics is essential for true operational stealth.
+
+---
+
+#### 1. The 5 Dead-Giveaway PID Heuristics Used by Attackers
+When an adversary or automated script audits the process table, they look for five specific behavioral discrepancies:
+
+1. **The Kernel Thread PID & Age Inversion Heuristic**:
+   * *The Mechanism:* In Linux, the kernel PID allocator (`alloc_pid()` in `kernel/pid.c`) allocates PIDs monotonically. True kernel threads (`[kthreadd]`, `[kworker/*]`, `[rcu_sched]`) are spawned during early kernel boot (typically PIDs 2 through ~100).
+   * *The Giveaway:* A process named `[kworker/u2:0]` with **PID 18429** on a system with 40 days uptime is an immediate, high-confidence red flag. Attackers know kernel threads are not born with high PIDs days after boot.
+
+2. **The PPID Parentage Mismatch**:
+   * *The Mechanism:* In Linux, all genuine kernel threads are direct children of `[kthreadd]` (**PPID 2**).
+   * *The Giveaway:* A user-space process masquerading as a kernel thread will have `PPID 1` (init/systemd) or `PPID <sshd_pid>`. A single command instantly busts amateur kernel masquerading:
+     ```bash
+     # Attackers spot fake kernel threads in 1 second:
+     ps -ef | awk '$8 ~ /^\[/ && $3 != 2'
+     ```
+
+3. **The Controlling Terminal (TTY) Anomaly**:
+   * *The Mechanism:* Genuine kernel threads never interact with terminal subsystems; their TTY field is strictly **`?`**.
+   * *The Giveaway:* If an interactive recovery shell on an SSH session (`pts/0` or `pts/1`) disguises itself as `[kworker/...]`, it is caught immediately:
+     ```bash
+     ps -ef | grep 'pts/' | grep '\['
+     ```
+
+4. **The Empty `cmdline` vs Kernel `PF_KTHREAD` Flag**:
+   * *The Mechanism:* Real kernel threads have **0 bytes in `/proc/[pid]/cmdline`**. Standard `ps` places brackets `[...]` around `comm` only when `cmdline` is completely empty. Genuine threads also have the `PF_KTHREAD` (0x00200000) bit set in `task_struct->flags`.
+   * *The Giveaway:* A user-space process that writes `[kworker]` into `argv[0]` still has a populated `/proc/[pid]/cmdline`, which automated audit scripts detect immediately.
+
+5. **SSH Session Fork Proximity (PID Clustering)**:
+   * *The Mechanism:* Because PIDs increment sequentially, an SSH connection follows a strict birth order:
+     * `sshd [priv]` = PID N
+     * `sshd: user@pts` = PID N+1
+     * Interactive Shell = PID N+2
+   * *The Giveaway:* An adversary monitoring logins knows that PID N+2 directly under `sshd: user@pts` is the operator's shell, regardless of whatever string is written to `argv[0]`.
+
+---
+
+#### 2. How `minish` Operators Beat the PID Game
+
+To achieve true operational invisibility against sophisticated adversaries, apply the following four rules:
+
+##### Rule 1: On an Interactive TTY, ALWAYS Match the Shell Profile (`-bash`)
+*Never* masquerade as a kernel thread on an interactive terminal (`pts/X`). Instead, disguise as a standard login shell:
+```bash
+exec minish -a "-bash"
+```
+*Why this works:* A login shell (`-bash`) is *supposed* to have a high PID, is *supposed* to be a child of `sshd` (`PPID N+1`), and is *supposed* to have a controlling terminal (`pts/0`). It matches every single kernel heuristic perfectly and generates zero audit alerts.
+
+##### Rule 2: For Background Tasks, Use Double-Fork Detachment (`detach` + `disown`)
+When running background monitors or forensic tools, do not leave them tied to your SSH terminal. Use `detach`:
+```bash
+minish> detach watch 5 findgrowth /var/log 5
+minish> disown 1
+```
+*What `detach` and `disown` do at the kernel level:*
+1. Invokes `setsid()` to create a new session group and **disconnect from the controlling terminal** (`TTY` becomes `?`).
+2. Closes and redirects `stdin`/`stdout`/`stderr` to `/dev/null` or dedicated RAM logfiles.
+3. Reparents the task under PID 1 (`init` / `systemd`).
+Now, disguising the detached job as a user-space daemon (e.g., `(sd-pam)`, `systemd --user`, or `cron`) looks 100% authentic: `TTY = ?`, `PPID = 1`, and high PID are completely normal for background user daemons.
+
+##### Rule 3: Decouple from Physical Storage via `memfd_create` (`b64exec` / `memrun`)
+Attackers auditing `/proc/*/exe` will find the on-disk binary path (`/proc/[pid]/exe -> /usr/local/bin/minish`).
+By launching from an anonymous memory descriptor via `b64exec` or `memrun`:
+```bash
+cat minish_payload.b64 | minish -c "b64exec -bash"
+```
+`/proc/[pid]/exe` points to `/memfd:minish (deleted)` or anonymous memory, severing all file associations from physical disk.
+
+##### Rule 4: True PID 1 Isolation (`memunshare -p`)
+To completely eliminate PID tracking across the host:
+```bash
+minish> memunshare -p
+```
+`minish` enters its own private PID namespace as **PID 1**. External process lists cannot see inside the private namespace, and inside the namespace, the Linux kernel protects PID 1 from `SIGKILL`.
+
