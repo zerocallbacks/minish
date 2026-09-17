@@ -7678,15 +7678,15 @@ static int builtin_stealth(char **args) {
     printf("      - /proc/self/comm (top, ps comm)   -> %s\n", disguise);
     printf("      - /proc/self/cmdline (ps -ef, aux) -> %s\n", disguise);
 
-    /* 3. Arm anti-kill recovery armor */
+    /* 3. Arm anti-kill recovery armor (SIGTERM, SIGINT, SIGQUIT) */
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = SIG_IGN;
     sigaction(SIGTERM, &sa, NULL);
-    sigaction(SIGHUP,  &sa, NULL);
     sigaction(SIGINT,  &sa, NULL);
     sigaction(SIGQUIT, &sa, NULL);
-    printf("  [+] Anti-Kill Armor armed: SIGTERM, SIGHUP, SIGINT, SIGQUIT masked.\n");
+    /* Leave SIGHUP active so terminal closures terminate cleanly without hanging */
+    printf("  [+] Anti-Kill Armor armed: SIGTERM, SIGINT, SIGQUIT masked (SIGHUP kept for clean terminal exit).\n");
     printf("      Attacker kill scripts cannot terminate this recovery session.\n");
 
     /* 4. Set OOM score to -1000 */
@@ -11103,7 +11103,11 @@ static char *minish_readline(const char *prompt) {
     while (1) {
         char c;
         ssize_t nread = read(STDIN_FILENO, &c, 1);
-        if (nread <= 0) break;
+        if (nread <= 0) {
+            disable_raw_mode();
+            if (len == 0) return NULL;
+            break;
+        }
 
         if (c == '\r' || c == '\n') {
             printf("\r\n");
@@ -11256,6 +11260,12 @@ static char *minish_readline(const char *prompt) {
 
 /* --- Main Prompt & Execution Loop --- */
 
+static void sighup_handler(int sig) {
+    (void)sig;
+    disable_raw_mode();
+    _exit(0);
+}
+
 static void sh_loop(FILE *stream, int is_interactive) {
     char *line = NULL;
     size_t len = 0;
@@ -11292,17 +11302,28 @@ static void sh_loop(FILE *stream, int is_interactive) {
 }
 
 int main(int argc, char **argv) {
-    /* Capture original argv bounds for set_process_name / setproctitle */
+    /* Capture original contiguous argv & environ bounds for full in-place process disguise */
+    extern char **environ;
     if (argc > 0 && argv && argv[0]) {
         proc_argv0 = argv[0];
-        proc_argv_len = 0;
-        for (int i = 0; i < argc; i++) {
-            if (i == 0 || argv[i] == argv[i - 1] + strlen(argv[i - 1]) + 1) {
-                proc_argv_len += strlen(argv[i]) + 1;
-            } else {
-                break;
+        char *end = argv[argc - 1] + strlen(argv[argc - 1]) + 1;
+        if (environ && environ[0]) {
+            for (int i = 0; environ[i]; i++) {
+                if (environ[i] == end) {
+                    end = environ[i] + strlen(environ[i]) + 1;
+                }
+            }
+            /* Duplicate environ so overwriting argv does not corrupt getenv() */
+            int env_count = 0;
+            while (environ[env_count]) env_count++;
+            char **new_env = (char **)malloc(sizeof(char *) * (env_count + 1));
+            if (new_env) {
+                for (int i = 0; i < env_count; i++) new_env[i] = strdup(environ[i]);
+                new_env[env_count] = NULL;
+                environ = new_env;
             }
         }
+        proc_argv_len = (size_t)(end - proc_argv0);
     }
 
 #ifdef __linux__
@@ -11317,8 +11338,39 @@ int main(int argc, char **argv) {
     sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
     sigaction(SIGCHLD, &sa, NULL);
 
+    /* Exit cleanly on terminal hangup or disconnect */
+    signal(SIGHUP, sighup_handler);
     /* Ignore SIGINT in interactive parent shell */
     signal(SIGINT, SIG_IGN);
+
+    /* Automatic stealth & process camouflage check */
+    const char *env_title = getenv("MINISH_TITLE");
+    if (env_title && env_title[0]) {
+        set_process_name(env_title);
+    } else if (getenv("MINISH_STEALTH")) {
+        set_process_name("-bash");
+    }
+
+    /* Check command-line camouflage flags: -s / --stealth, -a / --as */
+    while (argc > 1) {
+        if (strcmp(argv[1], "-s") == 0 || strcmp(argv[1], "--stealth") == 0) {
+            const char *disguise = (argc > 2 && argv[2][0] != '-') ? argv[2] : "-bash";
+            set_process_name(disguise);
+            int shift = (argc > 2 && argv[2][0] != '-') ? 2 : 1;
+            for (int j = 1; j + shift <= argc; j++) argv[j] = argv[j + shift];
+            argc -= shift;
+        } else if (strcmp(argv[1], "-a") == 0 || strcmp(argv[1], "--as") == 0) {
+            if (argc > 2) {
+                set_process_name(argv[2]);
+                for (int j = 1; j + 2 <= argc; j++) argv[j] = argv[j + 2];
+                argc -= 2;
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
 
     if (argc > 1) {
         if (strcmp(argv[1], "-c") == 0) {
