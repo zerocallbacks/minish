@@ -7295,7 +7295,10 @@ static int next_job_id = 1;
 static void update_shell_jobs(void) {
     for (int i = 0; i < MAX_SHELL_JOBS; i++) {
         if (shell_jobs[i].pid > 0 && shell_jobs[i].running) {
-            if (kill(shell_jobs[i].pid, 0) < 0 && errno == ESRCH) {
+            int status = 0;
+            pid_t r = waitpid(shell_jobs[i].pid, &status, WNOHANG);
+            if (r == shell_jobs[i].pid || (r < 0 && errno == ECHILD) ||
+                (kill(shell_jobs[i].pid, 0) < 0 && errno == ESRCH)) {
                 shell_jobs[i].running = 0;
             }
         }
@@ -7438,12 +7441,13 @@ static int builtin_jobs(char **args) {
     int found = 0;
     for (int i = 0; i < MAX_SHELL_JOBS; i++) {
         if (shell_jobs[i].pid > 0) {
-            printf("[%d]  PID %-6d  %-10s  %s  (log: %s)\n",
+            printf("[%d]  PID %-6d  %-10s  %s\n",
                    shell_jobs[i].id,
                    (int)shell_jobs[i].pid,
                    shell_jobs[i].running ? "Running" : "Done",
-                   shell_jobs[i].cmd,
-                   shell_jobs[i].logfile);
+                   shell_jobs[i].cmd);
+            printf("     Log: %s  |  Attach: 'attach %d'  |  Stop: 'stop %d'\n",
+                   shell_jobs[i].logfile, shell_jobs[i].id, shell_jobs[i].id);
             found++;
         }
     }
@@ -7477,6 +7481,166 @@ static int builtin_disown(char **args) {
     }
     fprintf(stderr, "minish: disown: job or PID '%s' not found\n", args[1]);
     return 1;
+}
+
+static int builtin_stop(char **args) {
+    if (!args[1]) {
+        printf("Usage: stop <job_id|pid> [-sig]\n");
+        printf("Terminates a detached or background job along with its child process tree.\n");
+        printf("Example: stop 1        (sends SIGTERM to job 1)\n");
+        printf("Example: stop 1 -9     (sends SIGKILL to job 1)\n");
+        return 1;
+    }
+
+    int sig = SIGTERM;
+    const char *target_str = args[1];
+    if (args[1][0] == '-' && args[2]) {
+        sig = atoi(args[1] + 1);
+        if (sig <= 0) sig = SIGTERM;
+        target_str = args[2];
+    } else if (args[2] && args[2][0] == '-') {
+        sig = atoi(args[2] + 1);
+        if (sig <= 0) sig = SIGTERM;
+    }
+
+    int target = atoi(target_str);
+    int slot = -1;
+    update_shell_jobs();
+    for (int i = 0; i < MAX_SHELL_JOBS; i++) {
+        if (shell_jobs[i].pid > 0 && (shell_jobs[i].id == target || shell_jobs[i].pid == target)) {
+            slot = i;
+            break;
+        }
+    }
+
+    pid_t pid = (slot != -1) ? shell_jobs[slot].pid : (pid_t)target;
+    if (pid <= 1) {
+        fprintf(stderr, "minish: stop: invalid PID or job target\n");
+        return 1;
+    }
+
+    kill_children_of(pid, sig);
+    if (kill(pid, sig) == 0) {
+        if (slot != -1) {
+            shell_jobs[slot].running = 0;
+            printf("[+] Stopped job [%d] (PID %d: %s) with signal %d\n",
+                   shell_jobs[slot].id, (int)pid, shell_jobs[slot].cmd, sig);
+        } else {
+            printf("[+] Terminated process PID %d with signal %d\n", (int)pid, sig);
+        }
+        return 0;
+    } else {
+        perror("minish: stop");
+        return 1;
+    }
+}
+
+static int builtin_attach(char **args) {
+    if (!args[1]) {
+        printf("Usage: attach <job_id|pid>\n");
+        printf("Taps into the live output log of a detached or background job.\n");
+        printf("Press Ctrl-C or 'q' at any time to detach without killing the process.\n");
+        return 1;
+    }
+
+    int target = atoi(args[1]);
+    int slot = -1;
+    update_shell_jobs();
+    for (int i = 0; i < MAX_SHELL_JOBS; i++) {
+        if (shell_jobs[i].pid > 0 && (shell_jobs[i].id == target || shell_jobs[i].pid == target)) {
+            slot = i;
+            break;
+        }
+    }
+
+    if (slot == -1) {
+        fprintf(stderr, "minish: attach: job or PID '%s' not found. Run 'jobs' to list active jobs.\n", args[1]);
+        return 1;
+    }
+
+    const char *logfile = shell_jobs[slot].logfile;
+    if (strcmp(logfile, "/dev/null") == 0 || strcmp(logfile, "inherited stdout") == 0) {
+        printf("Job [%d] (PID %d) output is not streaming to a log file (%s).\n",
+               shell_jobs[slot].id, (int)shell_jobs[slot].pid, logfile);
+        return 1;
+    }
+
+    FILE *fp = fopen(logfile, "r");
+    if (!fp) {
+        perror(logfile);
+        return 1;
+    }
+
+    printf("\n=== Attaching to Job [%d] (PID %d: %s) ===\n",
+           shell_jobs[slot].id, (int)shell_jobs[slot].pid, shell_jobs[slot].cmd);
+    printf("Log source: %s\n", logfile);
+    printf("Status:     %s\n", shell_jobs[slot].running ? "RUNNING" : "DONE");
+    printf("Press [Ctrl-C] or 'q' at any time to detach (process will NOT be killed).\n");
+    printf("--------------------------------------------------------------------------------\n");
+    fflush(stdout);
+
+    /* Print last 4KB */
+    fseek(fp, 0, SEEK_END);
+    long fsize = ftell(fp);
+    long seek_pos = (fsize > 4096) ? fsize - 4096 : 0;
+    fseek(fp, seek_pos, SEEK_SET);
+
+    char line_buf[512];
+    while (fgets(line_buf, sizeof(line_buf), fp)) {
+        fputs(line_buf, stdout);
+    }
+    fflush(stdout);
+
+    int running = 1;
+    struct termios orig_t;
+    int has_tty = isatty(STDIN_FILENO);
+    if (has_tty) {
+        tcgetattr(STDIN_FILENO, &orig_t);
+        struct termios raw = orig_t;
+        raw.c_lflag &= ~(ECHO | ICANON | ISIG);
+        raw.c_cc[VMIN] = 0;
+        raw.c_cc[VTIME] = 1;
+        tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+    }
+
+    while (running) {
+        while (fgets(line_buf, sizeof(line_buf), fp)) {
+            fputs(line_buf, stdout);
+            fflush(stdout);
+        }
+
+        if (has_tty) {
+            char ch;
+            if (read(STDIN_FILENO, &ch, 1) > 0) {
+                if (ch == 'q' || ch == 'Q' || ch == 3 || ch == 4) {
+                    running = 0;
+                    break;
+                }
+            }
+        }
+
+        int st = 0;
+        pid_t wr = waitpid(shell_jobs[slot].pid, &st, WNOHANG);
+        if (wr == shell_jobs[slot].pid || (wr < 0 && errno == ECHILD) ||
+            (kill(shell_jobs[slot].pid, 0) < 0 && errno == ESRCH)) {
+            shell_jobs[slot].running = 0;
+            while (fgets(line_buf, sizeof(line_buf), fp)) {
+                fputs(line_buf, stdout);
+            }
+            printf("\n[+] Process %d finished execution.\n", (int)shell_jobs[slot].pid);
+            break;
+        }
+
+        usleep(100000);
+    }
+
+    if (has_tty) {
+        tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_t);
+    }
+    fclose(fp);
+    printf("\n[+] Detached from job [%d]. Background process remains active.\n\n", shell_jobs[slot].id);
+    fflush(stdout);
+    return 0;
 }
 
 /* --- Anti-Adversary Stealth & Camouflage Engine --- */
@@ -7590,7 +7754,47 @@ static int show_command_help(const char *cmd) {
         return 1;
     }
 
-    if (strcmp(cmd, "disown") == 0) {
+    
+    if (strcmp(cmd, "stop") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: stop <job_id|pid> [-sig]\n");
+        printf("CATEGORY: Job Control & Process Tree Termination\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  stop <job_id|pid>                  # Graceful termination (SIGTERM, 15)\n");
+        printf("  stop <job_id|pid> -9               # Immediate forceful kill (SIGKILL, 9)\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Terminates a detached or background job. Automatically traverses /proc to\n");
+        printf("  terminate the target process AND all child processes it spawned (via kill_children_of)\n");
+        printf("  preventing orphan runaway workers from consuming CPU or memory.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ jobs                       # View active jobs\n");
+        printf("  minish$ stop 1                     # Terminate job [1] gracefully\n");
+        printf("  minish$ stop 3450 -9               # Force kill PID 3450\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "attach") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: attach <job_id|pid>\n");
+        printf("CATEGORY: Live Job Monitoring & Output Stream Viewer\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  attach <job_id|pid>\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Connects to the volatile RAM log output of a detached background process.\n");
+        printf("  Displays the most recent log entries and streams new output in real-time.\n");
+        printf("  Pressing [Ctrl-C] or 'q' detaches immediately back to the minish$ prompt\n");
+        printf("  WITHOUT terminating the background process.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ attach 1                   # Monitor live output of job [1]\n");
+        printf("  minish$ attach 3450                # Monitor live output of PID 3450\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+if (strcmp(cmd, "disown") == 0) {
         printf("\n================================================================================\n");
         printf("COMMAND: disown [job_id|pid]\n");
         printf("CATEGORY: Job Control & Tracking Release\n");
@@ -8464,7 +8668,9 @@ static int builtin_help(char **args) {
     printf("  stealth [name]               Disguise process, audit parent shell, arm anti-kill armor\n");
     printf("  detach [-o f] <cmd...>       Spawn daemonized background job (setsid, immune to SIGHUP)\n");
     printf("  jobs                         List active background and detached jobs\n");
-    printf("  disown [id|pid]              Release job tracking from shell\n\n");
+    printf("  disown [id|pid]              Release job tracking from shell\n");
+    printf("  stop <id|pid> [-sig]         Terminate detached/background job and child tree\n");
+    printf("  attach <id|pid>              Stream live output log of detached job (Ctrl-C detaches)\n\n");
     printf("Detailed Command Help & Recovery Examples:\n");
     printf("  Type 'help <command>' or '<command> --help' (e.g. 'help ramoverlay', 'help stealth',\n");
     printf("  'help deletedgrab', 'help truncate', 'help ghostfind', 'help exec', etc.)\n\n");
@@ -8630,6 +8836,8 @@ static const BuiltinDef builtins[] = {
     {"detach",       &builtin_detach,       1},
     {"jobs",         &builtin_jobs,         0},
     {"disown",       &builtin_disown,       1},
+    {"stop",         &builtin_stop,         0},
+    {"attach",       &builtin_attach,       0},
     {"b64exec",      &builtin_b64exec,      0},
     {"ramoverlay",   &builtin_ramoverlay,   0},
     {"exehunt",      &builtin_exehunt,      0},
