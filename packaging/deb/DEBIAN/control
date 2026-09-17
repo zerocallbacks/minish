@@ -1,0 +1,11 @@
+Package: minish
+Version: 1.0.0
+Section: shells
+Priority: optional
+Architecture: amd64
+Maintainer: System Administrator <admin@localhost>
+Description: Minimalist POSIX rescue and emergency administration shell
+ minish is a lightweight, low-dependency shell designed as a fail-safe
+ backup shell for system administration, container debugging, and disaster
+ recovery. Operates with zero history disk persistence, minimal memory
+ footprint, and built-in core utilities.

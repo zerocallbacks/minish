@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build-and-test:
+    name: Build & Test (Ubuntu Latest)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc make rpm dpkg-dev
+
+      - name: Build static binary with strict flags
+        run: |
+          gcc -Wall -Wextra -std=c99 -pedantic -Os -static shell.c -o minish
+          strip --strip-all minish
+          ls -lh minish
+
+      - name: Run comprehensive test suite
+        run: |
+          chmod +x test_suite.sh
+          ./minish test_suite.sh
+
+      - name: Verify Debian package creation
+        run: |
+          chmod +x package_deb.sh
+          ./package_deb.sh
+          dpkg -I minish_*.deb
+          dpkg -c minish_*.deb
+
+      - name: Verify RPM package creation
+        run: |
+          chmod +x package_rpm.sh
+          ./package_rpm.sh
+          rpm -qpi minish-*.rpm
+          rpm -qpl minish-*.rpm

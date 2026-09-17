@@ -1,0 +1,30 @@
+# Compiled binaries
+minish
+minish_static
+minish_dbg
+*.o
+*.a
+*.so
+
+# Packages and archives
+*.deb
+*.rpm
+minish-*.tar.gz
+minish-*.*.rpm
+build_deb/
+rpmbuild/
+minish-1.0.0/
+
+# Test sandboxes and runtime temporary files
+test_sandbox*/
+*.tmp
+*.log
+.scratch/
+
+# OS and Editor metadata
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.vscode/
+.idea/

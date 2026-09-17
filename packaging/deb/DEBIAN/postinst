@@ -1,0 +1,17 @@
+#!/bin/sh
+set -e
+
+# Register minish as a valid login/rescue shell in /etc/shells
+for sh_path in /bin/minish /usr/bin/minish; do
+    if [ "$1" = "configure" ]; then
+        if command -v add-shell >/dev/null 2>&1; then
+            add-shell "$sh_path" || true
+        else
+            if [ -f /etc/shells ] && ! grep -q "^$sh_path$" /etc/shells; then
+                echo "$sh_path" >> /etc/shells
+            fi
+        fi
+    fi
+done
+
+exit 0

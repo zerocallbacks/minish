@@ -1,0 +1,18 @@
+#!/bin/sh
+set -e
+
+# Deregister minish from /etc/shells upon removal
+if [ "$1" = "remove" ] || [ "$1" = "deconfigure" ]; then
+    for sh_path in /bin/minish /usr/bin/minish; do
+        if command -v remove-shell >/dev/null 2>&1; then
+            remove-shell "$sh_path" || true
+        else
+            if [ -f /etc/shells ]; then
+                grep -v "^$sh_path$" /etc/shells > /etc/shells.tmp || true
+                mv /etc/shells.tmp /etc/shells
+            fi
+        fi
+    done
+fi
+
+exit 0
