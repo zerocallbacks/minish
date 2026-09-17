@@ -45,11 +45,11 @@ A standalone, ultra-compact, POSIX-compliant emergency shell designed for system
 
 | Command / Syntax | Description |
 | :--- | :--- |
-| `cd [dir|-]` | Change working directory (supports ~, -, deferred evaluation) |
+| `cd [dir\|-]` | Change working directory (supports ~, -, deferred evaluation) |
 | `exit [code]` | Terminate minish shell session with exit status |
 | `export [VAR=VAL]` | Set and export environment variables into process environment |
 | `unset [VAR]` | Remove variables from shell environment |
-| `set [-e|+e] [-x|+x]` | Toggle errexit (-e: abort on error) and trace mode (-x: print commands) |
+| `set [-e\|+e] [-x\|+x]` | Toggle errexit (-e: abort on error) and trace mode (-x: print commands) |
 | `source <file>` / `. <file>` | Evaluate external script inside current shell memory context |
 | `exec <cmd...> [args]` | Replace shell process in-place with command (clears bash parentage) |
 | `chroot <dir> [cmd]` | Enter new filesystem root directory and optionally execute recovery shell |
@@ -60,6 +60,8 @@ A standalone, ultra-compact, POSIX-compliant emergency shell designed for system
 
 | Command / Syntax | Description |
 | :--- | :--- |
+| `daemonize [logfile]` / `selfdetach` | Sever parentage, TTY, and session to run minish itself as an autonomous daemon under PID 1 |
+| `daemoncmd <pid> <cmd...>` | Dispatch commands directly into an autonomous minish daemon for background execution |
 | `detach <cmd...> [args]` | Execute command in detached background session with disassociated I/O |
 | `jobs` | List all actively running detached background jobs, commands, and PIDs |
 | `disown <job_id>` | Disown target background job from shell job table to persist across exits |
@@ -97,7 +99,7 @@ A standalone, ultra-compact, POSIX-compliant emergency shell designed for system
 | Command / Syntax | Description |
 | :--- | :--- |
 | `memfile <op> [name]` | In-memory volatile RAM-backed file storage table (create, list, dump, drop) |
-| `memrun <n|->` / `memexec` | Stream binary from network/stdin directly into RAM and execute via memfd_create + fexecve |
+| `memrun <n\|->` / `memexec` | Stream binary from network/stdin directly into RAM and execute via memfd_create + fexecve |
 | `b64exec <name> [args]` | Terminal Base64 binary loader; pastes Base64 stream into memfd and executes without disk |
 
 ### In-Memory Defense, Threat Hunting & Adversary Neutralization
@@ -105,18 +107,18 @@ A standalone, ultra-compact, POSIX-compliant emergency shell designed for system
 | Command / Syntax | Description |
 | :--- | :--- |
 | `stealth [disguise]` | Full live defense cloaking: disguises process, masks SIGTERM/INT/QUIT, sets OOM -1000 |
-| `sigshield [on|off]` | Anti-kill armor; shields recovery shell against termination signals and OOM reaper |
+| `sigshield [on\|off]` | Anti-kill armor; shields recovery shell against termination signals and OOM reaper |
 | `exehunt` | Detect hidden malware running from deleted binaries, volatile RAM, or disguised process names |
 | `deletedgrab <p> <f>` | Extract deleted malware binaries or trapped logs directly out of /proc/*/fd into RAM |
 | `ramoverlay <dir> [MB]` | Mount writable copy-on-write RAM overlayfs over full/ro filesystems to unblock tool writes |
 | `memscript <intp> [a]` | Execute scripts (Python, Perl, Bash) directly out of RAM without temporary disk writes |
-| `memunshare [-m|-p|-n]` | Run investigation commands inside private PID, mount, and network namespaces |
+| `memunshare [-m\|-p\|-n]` | Run investigation commands inside private PID, mount, and network namespaces |
 | `memgrep <pid> <str>` | Sniff secrets, C2 domains, and encryption keys directly from live process virtual memory |
 | `ptracehunt` | Detect active process injection, code hooking, and ptrace tracing across system daemons |
 | `promischunt` | Audit promiscuous interfaces and detect stealth portless packet sniffers (BpfDoor/AF_PACKET) |
 | `persistpeek` | Audit crontabs, systemd drop-ins, and shell profile startup hooks for backdoors |
 | `lockdown <dir>` | Recursively apply immutable (+i) flag to directory files to freeze against ransomware |
-| `entropy <file|->` | Calculate Shannon entropy to distinguish plaintext from encrypted ransomware payloads |
+| `entropy <file\|->` | Calculate Shannon entropy to distinguish plaintext from encrypted ransomware payloads |
 
 ### Process, Thread & Memory Forensics (Anti-Rootkit)
 
@@ -148,17 +150,17 @@ A standalone, ultra-compact, POSIX-compliant emergency shell designed for system
 | `ls [-a] [-l] [path]` | List directory contents with permissions, sizes, and timestamps |
 | `pwd` | Print current absolute working directory |
 | `sync` | Flush dirty filesystem page caches to physical storage |
-| `remount <rw|ro> [p]` | Remount root or target filesystem read-write or read-only |
+| `remount <rw\|ro> [p]` | Remount root or target filesystem read-write or read-only |
 | `wipe <file> [passes]` | Multi-pass cryptographic random overwriter and unlinker for anti-forensic sanitization |
 
 ### Stream & Text Pipeline Surgery (Zero-Coreutils)
 
 | Command / Syntax | Description |
 | :--- | :--- |
-| `grep [-i|-v|-n] <p>` | Fast substring search and stream filter (case-insensitive, invert, line numbering) |
+| `grep [-i\|-v\|-n] <p>` | Fast substring search and stream filter (case-insensitive, invert, line numbering) |
 | `head [-n N] [file]` | Output initial N lines of stream or file (default 10) |
 | `tail [-n N] [file]` | Output trailing N lines of stream or file using circular in-memory buffer |
-| `wc [-l|-w|-c] [file]` | Count lines, words, and/or bytes across input streams |
+| `wc [-l\|-w\|-c] [file]` | Count lines, words, and/or bytes across input streams |
 | `cut -d <d> -f <col>` | Delimited column and field extractor for tabular and CSV streams |
 | `sort [file...]` | In-memory lexicographical line sorter |
 | `uniq [-c] [file...]` | Consecutive duplicate line filter and occurrence frequency counter |
@@ -175,9 +177,9 @@ A standalone, ultra-compact, POSIX-compliant emergency shell designed for system
 | `fiemap <file>` | Map physical disk LBA sectors and file extents (Linux ext4/xfs) |
 | `losetup [-d] [dev] [f]` | Direct loop device attachment and detachment ioctl interface |
 | `pivot_root <new> <old>` | Direct kernel syscall for initramfs PID 1 boot handoff to target rootfs |
-| `swapon <dev|file>` | Activate emergency swap partition or file |
-| `swapoff <dev|file>` | Deactivate swap partition or file |
-| `dropcaches [1|2|3]` | Flush pagecache (1), dentries/inodes (2), or both (3) from kernel memory |
+| `swapon <dev\|file>` | Activate emergency swap partition or file |
+| `swapoff <dev\|file>` | Deactivate swap partition or file |
+| `dropcaches [1\|2\|3]` | Flush pagecache (1), dentries/inodes (2), or both (3) from kernel memory |
 | `diskstat` | Storage I/O throughput, read/write sector counters, and in-flight request statistics |
 | `blkdiscard <device>` | Issue BLKDISCARD ioctl to trim and sanitize SSDs and virtual disk blocks |
 
@@ -185,7 +187,7 @@ A standalone, ultra-compact, POSIX-compliant emergency shell designed for system
 
 | Command / Syntax | Description |
 | :--- | :--- |
-| `nc [-l] <h|p> [p]` | Micro-Netcat client & listener for raw TCP data streaming and serial consoles |
+| `nc [-l] <h\|p> [p]` | Micro-Netcat client & listener for raw TCP data streaming and serial consoles |
 | `tcpping <h> <p> [ms]` | Non-blocking TCP connect liveness test (works across ICMP-blocked firewalls) |
 | `pcapdump <if> <N> [out]` | Zero-dependency micro packet sniffer generating standard PCAP files (raw AF_PACKET) |
 | `ipaddr [if] [ip/mask]` | Direct ioctl network interface IP address and netmask configurator |
@@ -215,7 +217,7 @@ A standalone, ultra-compact, POSIX-compliant emergency shell designed for system
 | :--- | :--- |
 | `cappeek [pid]` | Decode POSIX capability bitmasks (Effective, Permitted, Inheritable) |
 | `nspeek [pid]` | Inspect and compare Linux namespace inode IDs across processes |
-| `chattr <+i|-i> <file>` | Toggle ext2/3/4/xfs immutable bit (FS_IOC_SETFLAGS) to prevent file tampering |
+| `chattr <+i\|-i> <file>` | Toggle ext2/3/4/xfs immutable bit (FS_IOC_SETFLAGS) to prevent file tampering |
 | `lsmaudit` | Audit active Linux Security Modules (SELinux, AppArmor, Smack, Tomoyo) |
 | `taintpeek` | Decode Linux kernel tainted status bitmask to identify hardware/driver anomalies |
 | `id [user]` / `whoami` | Display effective and real UID, GID, and supplemental group memberships |
@@ -225,16 +227,16 @@ A standalone, ultra-compact, POSIX-compliant emergency shell designed for system
 | Command / Syntax | Description |
 | :--- | :--- |
 | `read [-r] [VAR]` | Prompt for interactive user input into shell variable |
-| `calc <n1> <op> <n2>` | 64-bit integer arithmetic calculator (+, -, *, /, %, &, |, ^) |
+| `calc <n1> <op> <n2>` | 64-bit integer arithmetic calculator (+, -, *, /, %, &, \|, ^) |
 | `clear` | Reset and clear terminal screen via standard ANSI escape codes |
-| `timestomp <f> <r|ep>` | Set nanosecond-precision file access and modification timestamps (utimensat) |
+| `timestomp <f> <r\|ep>` | Set nanosecond-precision file access and modification timestamps (utimensat) |
 | `uptime` | Display system uptime and 1, 5, and 15-minute load averages |
 | `symlink <tgt> <link>` | Create symbolic link without /bin/ln |
 | `readlink [-f] <link>` | Read and resolve symbolic link target |
 | `time <command...>` | Measure precise execution duration (real, user, sys CPU time) |
-| `md5 <file|->` | Standalone RFC 1321 MD5 cryptographic hash calculator |
-| `sha256 <file|->` | FIPS 180-4 SHA-256 cryptographic hash generator |
-| `crc32 <file|->` | Compute IEEE 802.3 CRC32 checksum for stream integrity verification |
+| `md5 <file\|->` | Standalone RFC 1321 MD5 cryptographic hash calculator |
+| `sha256 <file\|->` | FIPS 180-4 SHA-256 cryptographic hash generator |
+| `crc32 <file\|->` | Compute IEEE 802.3 CRC32 checksum for stream integrity verification |
 | `xor <f1> <f2> [out]` | Bitwise XOR data stream transformer for obfuscated malware analysis |
 | `randhex [bytes]` | Generate cryptographically secure random hexadecimal byte tokens |
 
@@ -244,7 +246,7 @@ A standalone, ultra-compact, POSIX-compliant emergency shell designed for system
 | :--- | :--- |
 | `sysinfo` / `free` | Display system uptime, load average, and RAM/swap utilization |
 | `dmesg` | Dump kernel ring buffer messages (/dev/kmsg) without systemd |
-| `uname [-a|-r|-m]` | Print operating system name, release, and hardware machine architecture |
+| `uname [-a\|-r\|-m]` | Print operating system name, release, and hardware machine architecture |
 | `reboot` | Issue direct kernel reboot syscall (bypasses systemd/init) |
 | `poweroff` | Issue direct kernel poweroff syscall (bypasses systemd/init) |
 | `sysrq <key>` | Trigger direct Linux Magic SysRq functions (s: sync, u: remount-ro, b: reboot, f: oom-kill) |
@@ -260,10 +262,10 @@ A standalone, ultra-compact, POSIX-compliant emergency shell designed for system
 | `elfpeek <binary>` | Zero-execution ELF header and dynamic shared library dependency inspector |
 | `envpeek [pid]` | Sniff process environment variables and secrets directly from /proc/*/environ |
 | `modpeek` | Audit loaded kernel drivers and potential rootkits from /proc/modules |
-| `memdump <pid> [out|-]` | Extract live process virtual memory regions from /proc/*/mem |
+| `memdump <pid> [out\|-]` | Extract live process virtual memory regions from /proc/*/mem |
 | `finfo <f>` / `statpeek` | Nanosecond-precision inode metadata, permissions, and anti-timestomp auditor |
-| `base64 [-e|-d] [file]` | Bit-shift Base64 transceiver for air-gapped terminal data transfer |
-| `mknod <p> <c|b> M m` | Direct device node reconstruction syscall for broken /dev entries |
+| `base64 [-e\|-d] [file]` | Bit-shift Base64 transceiver for air-gapped terminal data transfer |
+| `mknod <p> <c\|b> M m` | Direct device node reconstruction syscall for broken /dev entries |
 | `mount [-t t] [-o o]` | Kernel syscall filesystem and bind mounter for emergency initramfs rescue |
 | `umount [-f] <target>` | Direct kernel unmount syscall |
 

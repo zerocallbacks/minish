@@ -6729,7 +6729,7 @@ static int builtin_sigshield(char **args) {
     const char *action = args[1] ? args[1] : "on";
 
     if (strcmp(action, "on") == 0) {
-        signal(SIGTERM, SIG_IGN);
+        signal(SIGTERM, SIG_DFL);
         signal(SIGHUP, SIG_IGN);
         signal(SIGINT, SIG_IGN);
         signal(SIGQUIT, SIG_IGN);
@@ -7373,7 +7373,172 @@ static int add_shell_job(pid_t pid, const char *cmd, const char *logfile) {
     return shell_jobs[slot].id;
 }
 
+
+static int show_command_help(const char *cmd);
+
+static int self_daemonize_session(const char *custom_log) {
+    int sync_pipe[2];
+    if (pipe(sync_pipe) < 0) {
+        sync_pipe[0] = -1;
+        sync_pipe[1] = -1;
+    }
+
+    pid_t pid1 = fork();
+    if (pid1 < 0) {
+        perror("daemonize: fork");
+        if (sync_pipe[0] >= 0) { close(sync_pipe[0]); close(sync_pipe[1]); }
+        return -1;
+    }
+    if (pid1 > 0) {
+        if (sync_pipe[1] >= 0) close(sync_pipe[1]);
+        pid_t daemon_pid = pid1;
+        if (sync_pipe[0] >= 0) {
+            if (read(sync_pipe[0], &daemon_pid, sizeof(daemon_pid)) <= 0) {
+                daemon_pid = pid1;
+            }
+            close(sync_pipe[0]);
+        }
+        char logfile[256];
+        char cmdfifo[256];
+        if (custom_log && custom_log[0]) {
+            strncpy(logfile, custom_log, sizeof(logfile) - 1);
+            logfile[sizeof(logfile) - 1] = '\0';
+        } else {
+            snprintf(logfile, sizeof(logfile), "/dev/shm/minish_daemon_%d.log", (int)daemon_pid);
+        }
+        snprintf(cmdfifo, sizeof(cmdfifo), "/dev/shm/minish_cmd_%d.fifo", (int)daemon_pid);
+
+        printf("\033[1;32m[+] minish self-detached from parent process!\033[0m\n");
+        printf("    PID:       %d (reparented under PID 1)\n", (int)daemon_pid);
+        printf("    Terminal:  Disconnected from controlling TTY (TTY = ?)\n");
+        printf("    Logfile:   %s\n", logfile);
+        printf("    Cmd Pipe:  %s\n", cmdfifo);
+        printf("    Attach:    'minish attach %d' or 'tail -f %s'\n", (int)daemon_pid, logfile);
+        printf("    Command:   'minish daemoncmd %d <cmd>' or 'echo \"<cmd>\" > %s'\n", (int)daemon_pid, cmdfifo);
+        printf("    Stop:      'minish stop %d'\n", (int)daemon_pid);
+        fflush(stdout);
+        _exit(0);
+    }
+
+    if (sync_pipe[0] >= 0) close(sync_pipe[0]);
+    setsid();
+
+    pid_t pid2 = fork();
+    if (pid2 < 0) {
+        if (sync_pipe[1] >= 0) close(sync_pipe[1]);
+        _exit(1);
+    }
+    if (pid2 > 0) {
+        if (sync_pipe[1] >= 0) {
+            if (write(sync_pipe[1], &pid2, sizeof(pid2)) < 0) { /* suppress */ }
+            close(sync_pipe[1]);
+        }
+        _exit(0);
+    }
+    if (sync_pipe[1] >= 0) close(sync_pipe[1]);
+
+    /* Grandchild process: The autonomous daemon */
+    pid_t daemon_pid = getpid();
+    char logfile[256];
+    char cmdfifo[256];
+    if (custom_log && custom_log[0]) {
+        strncpy(logfile, custom_log, sizeof(logfile) - 1);
+        logfile[sizeof(logfile) - 1] = '\0';
+    } else {
+        snprintf(logfile, sizeof(logfile), "/dev/shm/minish_daemon_%d.log", (int)daemon_pid);
+    }
+    snprintf(cmdfifo, sizeof(cmdfifo), "/dev/shm/minish_cmd_%d.fifo", (int)daemon_pid);
+    unlink(cmdfifo);
+    mkfifo(cmdfifo, 0600);
+
+    /* Open command FIFO as stdin in O_RDWR mode so it never closes on EOF */
+    int fifo_fd = open(cmdfifo, O_RDWR);
+    if (fifo_fd >= 0) {
+        dup2(fifo_fd, STDIN_FILENO);
+        if (fifo_fd > 0) close(fifo_fd);
+    } else {
+        int devnull = open("/dev/null", O_RDONLY);
+        if (devnull >= 0) {
+            dup2(devnull, STDIN_FILENO);
+            if (devnull > 0) close(devnull);
+        }
+    }
+
+    int log_fd = open(logfile, O_WRONLY | O_CREAT | O_APPEND, 0600);
+    if (log_fd >= 0) {
+        dup2(log_fd, STDOUT_FILENO);
+        dup2(log_fd, STDERR_FILENO);
+        if (log_fd > 2) close(log_fd);
+    }
+
+    signal(SIGHUP, SIG_IGN);
+    signal(SIGTERM, SIG_DFL);
+    signal(SIGINT, SIG_IGN);
+
+    set_process_name("(sd-pam)");
+
+    printf("\n=== minish autonomous daemon active ===\n");
+    printf("PID: %d | PPID: 1 | TTY: ? | Disguise: (sd-pam)\n", (int)daemon_pid);
+    printf("Ready to execute commands via: %s\n", cmdfifo);
+    printf("Timestamp: %ld\n\n", (long)time(NULL));
+    fflush(stdout);
+
+    return 0;
+}
+
+static int builtin_daemonize(char **args) {
+    if (args && args[1] && (strcmp(args[1], "--help") == 0 || strcmp(args[1], "-h") == 0)) {
+        show_command_help("daemonize");
+        return 0;
+    }
+    const char *custom_log = (args && args[1]) ? args[1] : NULL;
+    if (self_daemonize_session(custom_log) < 0) {
+        return 1;
+    }
+    return 0;
+}
+
+static int builtin_daemoncmd(char **args) {
+    if (!args || !args[1] || !args[2] || strcmp(args[1], "--help") == 0 || strcmp(args[1], "-h") == 0) {
+        if (args && args[1] && (strcmp(args[1], "--help") == 0 || strcmp(args[1], "-h") == 0)) {
+            show_command_help("daemoncmd");
+            return 0;
+        }
+        printf("Usage: daemoncmd <pid> <command...>\n");
+        printf("Sends a command string directly into an autonomous minish daemon for execution.\n");
+        printf("Example: daemoncmd 4812 exehunt\n");
+        printf("Example: daemoncmd 4812 watch 5 findgrowth /var/log 5\n");
+        return 1;
+    }
+    int target_pid = atoi(args[1]);
+    if (target_pid <= 1) {
+        fprintf(stderr, "minish: daemoncmd: invalid daemon PID '%s'\n", args[1]);
+        return 1;
+    }
+    char fifo_path[256];
+    snprintf(fifo_path, sizeof(fifo_path), "/dev/shm/minish_cmd_%d.fifo", target_pid);
+    int fd = open(fifo_path, O_WRONLY | O_NONBLOCK);
+    if (fd < 0) {
+        fprintf(stderr, "minish: daemoncmd: failed to open daemon pipe %s (is daemon PID %d running?)\n", fifo_path, target_pid);
+        return 1;
+    }
+    for (int i = 2; args[i]; i++) {
+        if (i > 2) {
+            if (write(fd, " ", 1) < 0) { /* suppress */ }
+        }
+        if (write(fd, args[i], strlen(args[i])) < 0) { /* suppress */ }
+    }
+    if (write(fd, "\n", 1) < 0) { /* suppress */ }
+    close(fd);
+    printf("[+] Dispatched command to daemon PID %d via %s\n", target_pid, fifo_path);
+    printf("    Stream live results with: 'minish attach %d'\n", target_pid);
+    return 0;
+}
+
 static int builtin_detach(char **args) {
+    if (args && args[1] && (strcmp(args[1], "-s") == 0 || strcmp(args[1], "--self") == 0)) {
+        return builtin_daemonize(args + 1);
+    }
     if (!args || !args[1]) {
         printf("Usage: detach [-o logfile] [-e errfile] <command...> [args...]\n");
         printf("Spawns an independent background session (immune to SIGHUP / terminal hangup).\n");
@@ -7601,12 +7766,27 @@ static int builtin_attach(char **args) {
         }
     }
 
+    char daemon_log_buf[256];
+    const char *logfile = NULL;
+    int is_daemon = 0;
     if (slot == -1) {
-        fprintf(stderr, "minish: attach: job or PID '%s' not found. Run 'jobs' to list active jobs.\n", args[1]);
-        return 1;
+        snprintf(daemon_log_buf, sizeof(daemon_log_buf), "/dev/shm/minish_daemon_%d.log", target);
+        FILE *tfp = fopen(daemon_log_buf, "r");
+        if (!tfp) {
+            snprintf(daemon_log_buf, sizeof(daemon_log_buf), "/dev/shm/detach_%d.log", target);
+            tfp = fopen(daemon_log_buf, "r");
+        }
+        if (tfp) {
+            fclose(tfp);
+            logfile = daemon_log_buf;
+            is_daemon = 1;
+        } else {
+            fprintf(stderr, "minish: attach: job or daemon PID '%s' not found. Run 'jobs' to list active jobs.\n", args[1]);
+            return 1;
+        }
+    } else {
+        logfile = shell_jobs[slot].logfile;
     }
-
-    const char *logfile = shell_jobs[slot].logfile;
     if (strcmp(logfile, "/dev/null") == 0 || strcmp(logfile, "inherited stdout") == 0) {
         printf("Job [%d] (PID %d) output is not streaming to a log file (%s).\n",
                shell_jobs[slot].id, (int)shell_jobs[slot].pid, logfile);
@@ -7619,10 +7799,16 @@ static int builtin_attach(char **args) {
         return 1;
     }
 
-    printf("\n=== Attaching to Job [%d] (PID %d: %s) ===\n",
-           shell_jobs[slot].id, (int)shell_jobs[slot].pid, shell_jobs[slot].cmd);
-    printf("Log source: %s\n", logfile);
-    printf("Status:     %s\n", shell_jobs[slot].running ? "RUNNING" : "DONE");
+    if (is_daemon) {
+        printf("\n=== Attaching to Autonomous Daemon PID %d ===\n", target);
+        printf("Log source: %s\n", logfile);
+        printf("Session:    autonomous background daemon (PPID 1, TTY = ?)\n");
+    } else {
+        printf("\n=== Attaching to Job [%d] (PID %d: %s) ===\n",
+               shell_jobs[slot].id, (int)shell_jobs[slot].pid, shell_jobs[slot].cmd);
+        printf("Log source: %s\n", logfile);
+        printf("Status:     %s\n", shell_jobs[slot].running ? "RUNNING" : "DONE");
+    }
     printf("Press [Ctrl-C] or 'q' at any time to detach (process will NOT be killed).\n");
     printf("--------------------------------------------------------------------------------\n");
     fflush(stdout);
@@ -9642,6 +9828,309 @@ if (strcmp(cmd, "stealth") == 0) {
         return 1;
     }
 
+
+    if (strcmp(cmd, "daemonize") == 0 || strcmp(cmd, "selfdetach") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: daemonize [logfile] / selfdetach [logfile]\n");
+        printf("CATEGORY: Autonomous Background Shell Self-Detachment\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  daemonize                           # Detaches current minish shell into background\n");
+        printf("  daemonize <logfile>                 # Redirects background output to custom log\n");
+        printf("  selfdetach                          # Alias for daemonize\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Allows minish to sever its own parentage, session, and terminal, transforming\n");
+        printf("  into an autonomous background daemon under PID 1 (init/systemd):\n");
+        printf("  1. Double-Fork: First fork exits parent to release caller terminal immediately;\n");
+        printf("     child calls setsid() to create a new session (TTY = ?); second fork ensures\n");
+        printf("     the daemon cannot acquire a controlling terminal.\n");
+        printf("  2. In-Memory IPC: stdin is redirected from /dev/shm/minish_cmd_<pid>.fifo,\n");
+        printf("     enabling remote command dispatch from any other terminal via 'daemoncmd'.\n");
+        printf("  3. Zero-Disk Output: stdout and stderr stream to /dev/shm/minish_daemon_<pid>.log.\n");
+        printf("  4. Process Camouflage: Automatically cloaks title to (sd-pam) under PID 1.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ daemonize                   # Detach interactive shell into background\n");
+        printf("  minish$ daemoncmd <pid> exehunt     # Send forensic commands to running daemon\n");
+        printf("  minish$ attach <pid>                # Attach to live output stream from another session\n");
+        printf("  minish$ stop <pid>                  # Terminate the autonomous daemon\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "daemoncmd") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: daemoncmd <pid> <command...>\n");
+        printf("CATEGORY: Detached Daemon IPC Command Dispatcher\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  daemoncmd <pid> <command...>        # Dispatches command to detached minish daemon\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Writes command string into the daemon's non-blocking volatile command FIFO\n");
+        printf("  (/dev/shm/minish_cmd_<pid>.fifo). The background daemon reads and executes\n");
+        printf("  the command asynchronously, routing output to its volatile RAM log.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ daemoncmd 4812 exehunt\n");
+        printf("  minish$ daemoncmd 4812 watch 5 findgrowth /var/log 5\n");
+        printf("  minish$ attach 4812                 # Monitor execution results\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "memdump") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: memdump <pid> [out|-]\n");
+        printf("CATEGORY: Live Process Virtual Memory Carving & Forensic Extraction\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  memdump <pid>                       # Dumps virtual memory regions to /dev/shm/mem_<pid>.bin\n");
+        printf("  memdump <pid> <output_path>         # Dumps memory to specific destination file\n");
+        printf("  memdump <pid> -                     # Streams memory dump directly to stdout\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Extracts readable virtual memory segments directly via /proc/<pid>/mem without\n");
+        printf("  attaching via ptrace(PTRACE_ATTACH). This bypasses anti-debugging checks\n");
+        printf("  and evasive malware watchdogs that terminate when ptrace is detected.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ memdump 3412 /dev/shm/dump.bin\n");
+        printf("  minish$ strings /dev/shm/dump.bin | grep -E 'https?://|[0-9]{1,3}\\.[0-9]{1,3}'\n");
+        printf("  minish$ memdump 3412 - | nc 192.168.1.50 9999   # Stream dump off-box over raw TCP\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "stackpeek") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: stackpeek <pid>\n");
+        printf("CATEGORY: Kernel Call Stack & Execution Frame Inspector\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  stackpeek <pid>                     # Displays kernel call stack for target process\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Reads /proc/<pid>/stack (requires CONFIG_STACKTRACE) to inspect the current\n");
+        printf("  kernel execution path of threads. Reveals whether a process is stuck in a driver\n");
+        printf("  ioctl, waiting on an adversary raw socket, or halted in a kernel breakpoint.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ stackpeek 4812\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "wchanpeek") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: wchanpeek <pid>\n");
+        printf("CATEGORY: Kernel Wait Channel & Sleeping Syscall Inspector\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  wchanpeek <pid>                     # Prints symbol name where process is sleeping\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Reads /proc/<pid>/wchan to identify the exact kernel function where a thread is\n");
+        printf("  blocked (e.g. inet_csk_accept, do_select, sys_poll, wait_for_completion).\n");
+        printf("  Essential for identifying stealth listeners blocked on network triggers.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ wchanpeek 1420\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "pcapdump") == 0 || strcmp(cmd, "pcap") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: pcapdump <interface> <packet_count> [out.pcap]\n");
+        printf("CATEGORY: Zero-Coreutils Raw Network Packet Sniffer\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  pcapdump eth0 100                   # Captures 100 packets to /dev/shm/capture.pcap\n");
+        printf("  pcapdump any 500 /tmp/dump.pcap     # Captures across all interfaces\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Opens a raw AF_PACKET / SOCK_RAW socket (htons(ETH_P_ALL)) and records live\n");
+        printf("  Ethernet frames directly into standard libpcap format without requiring tcpdump\n");
+        printf("  or libpcap. Compatible with Wireshark and NetworkMiner for offline PCAP forensics.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ pcapdump eth0 50 /dev/shm/traffic.pcap\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "lockdown") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: lockdown <directory>\n");
+        printf("CATEGORY: Anti-Ransomware Recursive Directory Immunization\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  lockdown <directory>                # Recursively sets immutable flag (+i) on all files\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Recursively traverses the target path and issues FS_IOC_SETFLAGS ioctl system calls\n");
+        printf("  to apply the ext4/xfs FS_IMMUTABLE_FL (+i) attribute to every regular file and dir.\n");
+        printf("  Even root cannot modify, truncate, overwrite, encrypt, or delete immutable files\n");
+        printf("  until the flag is explicitly removed via chattr -i.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ lockdown /var/www/html      # Protect webroot against defacement/encryption\n");
+        printf("  minish$ lockdown /etc               # Freeze system configurations against tampering\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "entropy") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: entropy <file|->\n");
+        printf("CATEGORY: Ransomware & Packed Payload Shannon Entropy Calculator\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  entropy <file>                      # Calculates byte entropy score (0.0 to 8.0)\n");
+        printf("  cat stream | entropy -              # Analyzes stdin stream entropy\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Calculates mathematical Shannon Entropy: H = -sum(p_i * log2(p_i)) across 256 bytes.\n");
+        printf("  Provides instant classification of unknown files without external YARA or AV:\n");
+        printf("  - 0.00 - 3.50: Plain text, source code, ASCII logs\n");
+        printf("  - 5.00 - 6.80: Standard compiled ELF / PE binaries\n");
+        printf("  - 7.10 - 7.50: Gzip / bzip2 compressed archives\n");
+        printf("  - 7.85 - 8.00: ENCRYPTED ransomware files, AES ciphers, or packed malware\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ entropy /var/data/database.db\n");
+        printf("  (Score 7.98 -> File is encrypted! Trigger incident response immediately!)\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "sockstat") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: sockstat\n");
+        printf("CATEGORY: Zero-Coreutils Kernel Socket Table Auditor\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  sockstat                            # Dumps all active TCP/UDP listening and client sockets\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Directly parses /proc/net/tcp, /proc/net/tcp6, /proc/net/udp, /proc/net/udp6,\n");
+        printf("  converting hex IP representations to human-readable IPv4/IPv6 addresses.\n");
+        printf("  Translates TCP states (LISTEN, ESTABLISHED, TIME_WAIT, CLOSE_WAIT) in-memory\n");
+        printf("  without invoking netstat, ss, or lsof.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ sockstat\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "portscan") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: portscan <host> <start_port> <end_port> [timeout_ms]\n");
+        printf("CATEGORY: Autonomous TCP Connect Port Scanner\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  portscan 127.0.0.1 1 1024           # Scans privileged ports 1-1024 on localhost\n");
+        printf("  portscan 10.0.0.1 20 100 200        # Scans target ports with 200ms connection timeout\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Performs non-blocking TCP socket connect() sweeps using select() timeouts.\n");
+        printf("  Enables responders to audit local ports or adjacent pivot hosts when nmap,\n");
+        printf("  masscan, and netcat are missing from the system.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ portscan 127.0.0.1 1 8080\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "elfpeek") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: elfpeek <binary>\n");
+        printf("CATEGORY: Zero-Execution ELF & Dynamic Linker Inspector\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  elfpeek <path_to_binary>            # Inspects headers, interpreter, and shared libraries\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Parses the ELF header (Elf64_Ehdr) and program headers (Elf64_Phdr) directly.\n");
+        printf("  Extracts: ELF class (32/64-bit), OS/ABI, entry point address, PT_INTERP (dynamic\n");
+        printf("  linker), and DT_NEEDED shared library dependencies without executing the binary.\n");
+        printf("  Safe for analyzing unknown suspect malware binaries without triggering code execution.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ elfpeek /tmp/suspect_binary\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "envpeek") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: envpeek <pid>\n");
+        printf("CATEGORY: Live Process Environment & Secret Sniffer\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  envpeek <pid>                       # Prints complete environment variables of process\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Reads /proc/<pid>/environ directly out of kernel memory. Environment variables\n");
+        printf("  are null-byte delimited and cannot be cleared by userland unsetenv() in many\n");
+        printf("  scenarios, revealing original launch parameters, AWS_SECRET_ACCESS_KEY, tokens,\n");
+        printf("  and database connection strings.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ envpeek 1842\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "modpeek") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: modpeek\n");
+        printf("CATEGORY: Kernel Module & Rootkit Auditor\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  modpeek                             # Lists all loaded kernel modules and memory addresses\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Parses /proc/modules and /sys/module directly, displaying module names, memory sizes,\n");
+        printf("  load counts, and kernel load status (Live, Loading, Unloading). Detects untracked\n");
+        printf("  or rogue Loadable Kernel Modules (LKMs) without requiring lsmod.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ modpeek\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "cappeek") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: cappeek <pid>\n");
+        printf("CATEGORY: Linux POSIX Capability Bitmask Auditor\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  cappeek <pid>                       # Decodes process capability sets into human names\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Reads /proc/<pid>/status, decodes CapInh (Inheritable), CapPrm (Permitted),\n");
+        printf("  CapEff (Effective), CapBnd (Bounding), and CapAmb (Ambient) 64-bit masks,\n");
+        printf("  and prints active capabilities (e.g. CAP_SYS_ADMIN, CAP_NET_ADMIN, CAP_NET_RAW).\n");
+        printf("  Identifies processes with privilege escalation or container escape capabilities.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ cappeek 4812\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "lsmaudit") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: lsmaudit [pid]\n");
+        printf("CATEGORY: Linux Security Module (AppArmor / SELinux) Auditor\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  lsmaudit                            # Checks host LSM confinement status\n");
+        printf("  lsmaudit <pid>                      # Audits security context of specific process\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Inspects /proc/<pid>/attr/current, /proc/<pid>/attr/context, and /sys/kernel/security/lsm\n");
+        printf("  to determine if a process is confined by AppArmor, SELinux, or running unconfined.\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ lsmaudit 1420\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
+    if (strcmp(cmd, "taintpeek") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: taintpeek\n");
+        printf("CATEGORY: Kernel Taint Flags Decoder\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  taintpeek                           # Decodes /proc/sys/kernel/tainted bitmask\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Reads the integer bitmask from /proc/sys/kernel/tainted and decodes kernel taint\n");
+        printf("  reasons: proprietary module (P), force loaded module (F), unsafe CPU (S),\n");
+        printf("  forced unload (R), machine check exception (M), bad page fault (B), livepatch (K).\n\n");
+        printf("OFFLINE USAGE & EXAMPLES:\n");
+        printf("  minish$ taintpeek\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
+
     return 0;
 }
 
@@ -9828,6 +10317,9 @@ static int builtin_exit(char **args) {
 
 /* Built-in table */
 static const BuiltinDef builtins[] = {
+    {"daemonize",    &builtin_daemonize,    0},
+    {"selfdetach",   &builtin_daemonize,    0},
+    {"daemoncmd",    &builtin_daemoncmd,    0},
     {"vim",          &builtin_vim,          0},
     {"vi",           &builtin_vim,          0},
     {"cd",           &builtin_cd,           1},
@@ -11374,6 +11866,17 @@ int main(int argc, char **argv) {
         proc_argv_len = (size_t)(end - proc_argv0);
     }
 
+    /* Duplicate argv so process title cloaking (which zeroes original argv memory)
+     * does not corrupt command-line argument processing (-c, scripts, flags). */
+    char **orig_argv = argv;
+    argv = (char **)malloc(sizeof(char *) * (argc + 1));
+    if (argv) {
+        for (int i = 0; i < argc; i++) argv[i] = strdup(orig_argv[i]);
+        argv[argc] = NULL;
+    } else {
+        argv = orig_argv;
+    }
+
 #ifdef __linux__
     /* Subreaper: adopt and reap orphaned background processes (PID 1 container hygiene) */
     prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0);
@@ -11408,7 +11911,13 @@ int main(int argc, char **argv) {
 
     /* Unified command-line options parsing loop: -s, -a, --no-disguise, -i / --immortal / --sentinel */
     int immortal_mode = (getenv("MINISH_IMMORTAL") != NULL);
+    int daemon_mode = 0;
     while (argc > 1) {
+        if (strcmp(argv[1], "-d") == 0 || strcmp(argv[1], "--daemon") == 0 || strcmp(argv[1], "--detach") == 0) {
+            daemon_mode = 1;
+            for (int j = 1; j + 1 <= argc; j++) argv[j] = argv[j + 1];
+            argc -= 1;
+        } else
         if (strcmp(argv[1], "--no-disguise") == 0) {
             do_cloak = 0;
             for (int j = 1; j + 1 <= argc; j++) argv[j] = argv[j + 1];
@@ -11435,6 +11944,10 @@ int main(int argc, char **argv) {
         } else {
             break;
         }
+    }
+
+    if (daemon_mode) {
+        self_daemonize_session(NULL);
     }
 
     if (immortal_mode && isatty(STDIN_FILENO) && (argc <= 1 || (argc > 1 && strcmp(argv[1], "-c") != 0 && strcmp(argv[1], "--version") != 0 && strcmp(argv[1], "-v") != 0 && strcmp(argv[1], "--help") != 0 && strcmp(argv[1], "-h") != 0))) {

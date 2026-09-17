@@ -1974,3 +1974,214 @@ minish> memunshare -p
 ```
 `minish` enters its own private PID namespace as **PID 1**. External process lists cannot see inside the private namespace, and inside the namespace, the Linux kernel protects PID 1 from `SIGKILL`.
 
+
+
+### 6.6 Autonomous Self-Detachment (`daemonize` / `selfdetach` / `minish -d`)
+
+#### The Operational Imperative: Why Self-Detachment Is Mandatory
+When responding to an active intrusion, if the triage shell remains bound to the login terminal or parent process (`sshd: user@pts`, web server, or script runner):
+1. **Adversary Discovery:** Automated adversary monitoring loops watching `ps -ef` or `/dev/pts/*` immediately spot the interactive terminal and process tree (`sshd -> bash -> minish`).
+2. **Session Vulnerability:** If the network drops or the terminal window is closed, the kernel sends `SIGHUP` to the process group, prematurely aborting forensic captures and volatile log monitors.
+3. **Lineage Traps:** Even with process title disguise, remaining attached to an interactive `pts/X` device violates the PID/TTY heuristic profile for background workers.
+
+To solve this, `minish` features an in-place **Autonomous Self-Detachment Engine** (`daemonize`, `selfdetach`, and `minish -d`).
+
+---
+
+#### Double-Fork Kernel Architecture
+
+```
+[Operator TTY / SSH Session]
+      │
+      ├─► 1. Invokes: minish$ daemonize
+      │
+      ├─► 2. First fork():
+      │      - Parent prints detachment parameters (PID, logfile, command pipe)
+      │      - Parent exits immediately (exit code 0), freeing the operator terminal!
+      │
+      ├─► 3. Child calls setsid():
+      │      - Creates a new session ID and process group.
+      │      - Completely severs the controlling terminal (/dev/tty). TTY becomes '?'.
+      │
+      ├─► 4. Second fork():
+      │      - First child exits.
+      │      - Grandchild process is guaranteed NOT to be a session leader,
+      │        making it architecturally impossible to reacquire a controlling terminal.
+      │
+      └─► 5. Autonomous Grandchild Daemon (PID N):
+             - Reparented under PID 1 (systemd / init).
+             - stdin bound to /dev/shm/minish_cmd_<pid>.fifo in O_RDWR mode (never closes on EOF).
+             - stdout & stderr bound to /dev/shm/minish_daemon_<pid>.log (volatile RAM tmpfs, 0 disk writes).
+             - Signal shielding active against SIGHUP and SIGINT.
+             - Process title automatically cloaked to (sd-pam).
+```
+
+---
+
+#### Operational Workflow: Detaching, Controlling & Monitoring
+
+##### 1. Detach from an Interactive Session
+From inside an active `minish` shell:
+```bash
+minish$ daemonize
+[+] minish self-detached from parent process!
+    PID:       4812 (reparented under PID 1)
+    Terminal:  Disconnected from controlling TTY (TTY = ?)
+    Logfile:   /dev/shm/minish_daemon_4812.log
+    Cmd Pipe:  /dev/shm/minish_cmd_4812.fifo
+    Attach:    'minish attach 4812' or 'tail -f /dev/shm/minish_daemon_4812.log'
+    Command:   'minish daemoncmd 4812 <cmd>' or 'echo "<cmd>" > /dev/shm/minish_cmd_4812.fifo'
+    Stop:      'minish stop 4812'
+```
+The parent process terminates with exit status 0, immediately returning control to your caller shell or allowing you to cleanly disconnect your SSH session.
+
+##### 2. Launch in Detached Mode from the Command Line (`minish -d`)
+To launch `minish` as a detached autonomous daemon from the outset:
+```bash
+# Launch detached daemon executing a background monitor:
+minish -d -c "watch 5 findgrowth /var/log 5"
+
+# Or launch detached daemon ready for interactive command dispatch:
+minish -d -a "(sd-pam)"
+```
+
+##### 3. Dispatching Commands to the Detached Daemon (`daemoncmd`)
+You can send forensic tasks to the running daemon at any time from any terminal or script:
+```bash
+# Execute memory and executable hunting:
+minish$ daemoncmd 4812 exehunt
+
+# Stream network socket table:
+minish$ daemoncmd 4812 sockstat
+
+# Start continuous packet capture to volatile RAM:
+minish$ daemoncmd 4812 pcapdump eth0 1000 /dev/shm/traffic.pcap
+```
+Commands are written into the daemon's non-blocking FIFO in volatile RAM (`/dev/shm/minish_cmd_<pid>.fifo`). The daemon executes each command in sequence and writes structured output to its volatile log.
+
+##### 4. Attaching to Live Daemon Output (`attach`)
+To inspect the daemon's live output stream from another terminal or login session:
+```bash
+minish$ attach 4812
+```
+`attach` connects directly to `/dev/shm/minish_daemon_4812.log`, displays recent output, and streams new lines in real time (similar to `tail -f`).
+* **Safe Detach:** Press `Ctrl-C` or `q` at any time to return to your prompt. **The daemon will NOT be terminated.**
+
+##### 5. Terminating the Autonomous Daemon (`stop`)
+```bash
+minish$ stop 4812
+[+] Terminated process PID 4812 with signal 15
+```
+`stop` sends `SIGTERM` (or `SIGKILL` with `stop <pid> -9`), and automatically walks `/proc` to reap any child scanner processes spawned by the daemon (`kill_children_of`).
+
+---
+
+### 6.7 Deep Dive: Memory, Kernel & Complex Forensic Tools Reference
+
+This section documents the technical mechanisms, kernel syscalls, and step-by-step incident response runbooks for all complex memory and forensic tools in `minish`. All of these commands support in-shell documentation via `help <command>` or `<command> --help`.
+
+---
+
+#### 1. Live Virtual Memory Carving: `memdump <pid> [out|-]`
+* **Kernel Mechanism:** Opens `/proc/<pid>/mem` using `pread64()`, parsing segment permissions from `/proc/<pid>/maps`. Extracts readable virtual memory without attaching via `ptrace(PTRACE_ATTACH)`.
+* **Why It Matters:** Bypasses anti-debugging detection in evasive malware (which aborts if `TracerPid != 0`).
+* **IR Runbook:**
+  ```bash
+  # 1. Carve suspect process memory directly to volatile RAM:
+  minish$ memdump 3412 /dev/shm/proc3412.raw
+
+  # 2. Extract embedded C2 domains and URLs:
+  minish$ strings /dev/shm/proc3412.raw | grep -E 'https?://|[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}'
+
+  # 3. Stream memory off-box over encrypted or raw TCP:
+  minish$ memdump 3412 - | nc 192.168.1.50 9999
+  ```
+
+---
+
+#### 2. Kernel Call Stack Auditing: `stackpeek <pid>`
+* **Kernel Mechanism:** Reads `/proc/<pid>/stack` (requires `CONFIG_STACKTRACE`), parsing active kernel frame addresses.
+* **Why It Matters:** Identifies whether a process is stuck waiting on an adversary raw socket, blocked in a driver ioctl, or halted at an execution breakpoint.
+* **IR Runbook:**
+  ```bash
+  minish$ stackpeek 4812
+  # Identifies exact kernel functions (e.g. inet_csk_accept, sys_read)
+  ```
+
+---
+
+#### 3. Kernel Wait Channel Inspection: `wchanpeek <pid>`
+* **Kernel Mechanism:** Reads `/proc/<pid>/wchan` to resolve the symbol name where a thread is sleeping in the scheduler.
+* **Why It Matters:** Identifies stealth network backdoors sleeping on packet triggers or blocked on dormant pipes.
+
+---
+
+#### 4. Zero-Coreutils Raw Packet Sniffer: `pcapdump <interface> <count> [out.pcap]`
+* **Kernel Mechanism:** Opens an `AF_PACKET` raw socket with `SOCK_RAW` and `htons(ETH_P_ALL)`. Captures live Ethernet frames and writes standard libpcap header format (`0xa1b2c3d4`) without `tcpdump` or `libpcap`.
+* **IR Runbook:**
+  ```bash
+  # Capture 500 frames across eth0 to volatile RAM:
+  minish$ pcapdump eth0 500 /dev/shm/triage.pcap
+  ```
+
+---
+
+#### 5. Anti-Ransomware Directory Immunization: `lockdown <directory>`
+* **Kernel Mechanism:** Traverses directories and issues `FS_IOC_SETFLAGS` ioctls setting the ext4/xfs `FS_IMMUTABLE_FL` (`+i`) flag.
+* **Why It Matters:** Renders files completely immune to modification, truncation, encryption, or deletion—even by root.
+* **IR Runbook:**
+  ```bash
+  # Freeze webroot or databases against active ransomware encryption:
+  minish$ lockdown /var/www
+  minish$ lockdown /etc
+  ```
+
+---
+
+#### 6. Ransomware & Packed Malware Shannon Entropy: `entropy <file|->`
+* **Kernel Mechanism:** Calculates Shannon Entropy: $H = -\sum p_i \log_2(p_i)$ across 256 bytes.
+* **Interpretation:**
+  * `0.00 - 3.50`: Plain text, source code, ASCII logs.
+  * `5.00 - 6.80`: Standard compiled ELF / PE binaries.
+  * `7.10 - 7.50`: Compressed archives (gzip, xz).
+  * `7.85 - 8.00`: **Encrypted ransomware files or packed malware payloads.**
+
+---
+
+#### 7. Zero-Coreutils Socket Table Auditor: `sockstat`
+* **Kernel Mechanism:** Directly parses `/proc/net/tcp`, `/proc/net/tcp6`, `/proc/net/udp`, `/proc/net/udp6`, and converts hex IP/ports into human-readable notation without invoking `netstat` or `ss`.
+
+---
+
+#### 8. Autonomous TCP Port Scanner: `portscan <host> <start> <end> [timeout_ms]`
+* **Kernel Mechanism:** Non-blocking TCP socket `connect()` sweeps using `select()` timeouts, enabling responders to audit internal services when `nmap` is missing.
+
+---
+
+#### 9. Zero-Execution ELF & Dynamic Linker Inspector: `elfpeek <binary>`
+* **Kernel Mechanism:** Parses `Elf64_Ehdr` and `Elf64_Phdr` directly. Extracts entry points, `PT_INTERP` (dynamic linkers), and `DT_NEEDED` dependencies without executing the binary. Safe for suspect malware analysis.
+
+---
+
+#### 10. Live Process Environment & Secret Sniffer: `envpeek <pid>`
+* **Kernel Mechanism:** Reads `/proc/<pid>/environ` null-delimited bytes directly out of kernel memory to recover tokens, API keys, and passwords.
+
+---
+
+#### 11. Kernel Rootkit Auditor: `modpeek`
+* **Kernel Mechanism:** Parses `/proc/modules` and `/sys/module` directly to detect hidden or unregistered Loadable Kernel Modules (LKMs).
+
+---
+
+#### 12. POSIX Capability Bitmask Auditor: `cappeek <pid>`
+* **Kernel Mechanism:** Decodes `CapInh`, `CapPrm`, `CapEff`, `CapBnd`, and `CapAmb` 64-bit masks from `/proc/<pid>/status`, translating raw bits into human-readable names (`CAP_SYS_ADMIN`, `CAP_NET_RAW`).
+
+---
+
+#### 13. Linux Security Module Auditor: `lsmaudit [pid]`
+* **Kernel Mechanism:** Inspects `/proc/<pid>/attr/current` and `/sys/kernel/security/lsm` to determine if a process is confined by AppArmor, SELinux, or running unconfined.
+
+---
+
+#### 14. Kernel Taint Flags Decoder: `taintpeek`
+* **Kernel Mechanism:** Reads `/proc/sys/kernel/tainted` and decodes the 32-bit kernel taint bitmask (proprietary drivers, forced modules, CPU out of spec, memory corruption, livepatch).

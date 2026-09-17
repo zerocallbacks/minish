@@ -427,7 +427,20 @@ help vim > vim_cmdhelp.out
 [ -s vim_cmdhelp.out ] && grep "MODAL STATES & KEYBINDINGS" vim_cmdhelp.out > /dev/null && echo "help vim keybindings verified"
 rm -f vim_help.out vi_help.out vim_cmdhelp.out
 
-echo "=== Test 51: Cleanup and recursive rm ==="
+echo "=== Test 51: Autonomous Daemon Self-Detachment & Rich Help Engine ==="
+daemonize --help > d_help.out
+[ -s d_help.out ] && grep "Autonomous Background Shell Self-Detachment" d_help.out > /dev/null && echo "daemonize --help verified"
+memdump --help > md_help.out
+[ -s md_help.out ] && grep "Live Process Virtual Memory Carving" md_help.out > /dev/null && echo "memdump --help verified"
+lockdown --help > ld_help.out
+[ -s ld_help.out ] && grep "Anti-Ransomware Recursive Directory Immunization" ld_help.out > /dev/null && echo "lockdown --help verified"
+entropy --help > ent_help.out
+[ -s ent_help.out ] && grep "Shannon Entropy Calculator" ent_help.out > /dev/null && echo "entropy --help verified"
+sockstat --help > ss_help.out
+[ -s ss_help.out ] && grep "Kernel Socket Table Auditor" ss_help.out > /dev/null && echo "sockstat --help verified"
+rm -f d_help.out md_help.out ld_help.out ent_help.out ss_help.out
+
+echo "=== Test 52: Cleanup and recursive rm ==="
 cd ..
 rm -rf test_sandbox
 [ ! -d test_sandbox ] && echo "Cleaned up sandbox recursively."
