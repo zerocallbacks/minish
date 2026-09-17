@@ -7702,10 +7702,1104 @@ static int builtin_stealth(char **args) {
     return 0;
 }
 
+/* Forward declarations for terminal raw mode control */
+static int enable_raw_mode(void);
+static void disable_raw_mode(void);
+
+/* --- Zero-Dependency In-Memory Modal Micro-Editor (vim / vi) --- */
+
+#define VIM_MODE_NORMAL  0
+#define VIM_MODE_INSERT  1
+#define VIM_MODE_COMMAND 2
+#define VIM_MODE_SEARCH  3
+
+enum VimKey {
+    VIM_KEY_BACKSPACE = 127,
+    VIM_KEY_ARROW_LEFT = 1000,
+    VIM_KEY_ARROW_RIGHT,
+    VIM_KEY_ARROW_UP,
+    VIM_KEY_ARROW_DOWN,
+    VIM_KEY_DEL,
+    VIM_KEY_HOME,
+    VIM_KEY_END,
+    VIM_KEY_PAGE_UP,
+    VIM_KEY_PAGE_DOWN
+};
+
+typedef struct {
+    char *chars;
+    int len;
+} VimRow;
+
+typedef struct {
+    VimRow *rows;
+    int num_rows;
+    int cx, cy;            /* cursor col, cursor row */
+    int row_offset;        /* top row visible */
+    int col_offset;        /* left col visible */
+    int screen_rows;       /* rows in text viewport */
+    int screen_cols;       /* cols in viewport */
+    char *filename;        /* active file */
+    int modified;          /* 1 if modified */
+    int mode;              /* current mode */
+    char status_msg[128];  /* message on status line */
+    time_t status_time;
+    char *yank_buf;        /* line yank buffer */
+    int show_nu;           /* 1 = line numbers shown */
+    char search_pat[64];   /* last search pattern */
+    /* Single-level undo buffer */
+    VimRow *undo_rows;
+    int undo_num_rows;
+    int undo_cx, undo_cy;
+    int has_undo;
+    int replace_pending;
+    int g_pending;         /* for 'gg' */
+    int d_pending;         /* for 'dd' */
+    int y_pending;         /* for 'yy' */
+    int z_pending;         /* for 'ZZ'/'ZQ' */
+} VimEditor;
+
+struct vim_abuf {
+    char *b;
+    int len;
+    int cap;
+};
+
+static void abuf_append(struct vim_abuf *ab, const char *s, int len) {
+    if (len <= 0) return;
+    if (ab->len + len >= ab->cap) {
+        int ncap = (ab->cap == 0) ? 1024 : ab->cap * 2;
+        while (ab->len + len >= ncap) ncap *= 2;
+        char *nb = (char *)realloc(ab->b, ncap);
+        if (!nb) return;
+        ab->b = nb;
+        ab->cap = ncap;
+    }
+    memcpy(ab->b + ab->len, s, len);
+    ab->len += len;
+}
+
+static void abuf_free(struct vim_abuf *ab) {
+    free(ab->b);
+    ab->b = NULL;
+    ab->len = 0;
+    ab->cap = 0;
+}
+
+static void vim_free_row(VimRow *row) {
+    free(row->chars);
+    row->chars = NULL;
+    row->len = 0;
+}
+
+static void vim_insert_row(VimEditor *E, int at, const char *s, int len) {
+    if (at < 0 || at > E->num_rows) return;
+    E->rows = (VimRow *)realloc(E->rows, sizeof(VimRow) * (E->num_rows + 1));
+    if (at < E->num_rows) {
+        memmove(&E->rows[at + 1], &E->rows[at], sizeof(VimRow) * (E->num_rows - at));
+    }
+    E->rows[at].len = len;
+    E->rows[at].chars = (char *)malloc(len + 1);
+    if (len > 0 && s) memcpy(E->rows[at].chars, s, len);
+    E->rows[at].chars[len] = '\0';
+    E->num_rows++;
+    E->modified = 1;
+}
+
+static void vim_del_row(VimEditor *E, int at) {
+    if (at < 0 || at >= E->num_rows) return;
+    vim_free_row(&E->rows[at]);
+    if (at < E->num_rows - 1) {
+        memmove(&E->rows[at], &E->rows[at + 1], sizeof(VimRow) * (E->num_rows - at - 1));
+    }
+    E->num_rows--;
+    E->modified = 1;
+}
+
+static void vim_row_insert_char(VimRow *row, int at, int c) {
+    if (at < 0 || at > row->len) at = row->len;
+    char *nb = (char *)realloc(row->chars, row->len + 2);
+    if (!nb) return;
+    row->chars = nb;
+    memmove(&row->chars[at + 1], &row->chars[at], row->len - at + 1);
+    row->chars[at] = (char)c;
+    row->len++;
+}
+
+static void vim_row_del_char(VimRow *row, int at) {
+    if (at < 0 || at >= row->len) return;
+    memmove(&row->chars[at], &row->chars[at + 1], row->len - at);
+    row->len--;
+}
+
+static void vim_row_append_string(VimRow *row, const char *s, int len) {
+    if (len <= 0) return;
+    char *nb = (char *)realloc(row->chars, row->len + len + 1);
+    if (!nb) return;
+    row->chars = nb;
+    memcpy(&row->chars[row->len], s, len);
+    row->len += len;
+    row->chars[row->len] = '\0';
+}
+
+static void vim_save_undo(VimEditor *E) {
+    if (E->has_undo && E->undo_rows) {
+        for (int i = 0; i < E->undo_num_rows; i++) vim_free_row(&E->undo_rows[i]);
+        free(E->undo_rows);
+        E->undo_rows = NULL;
+    }
+    E->undo_num_rows = E->num_rows;
+    E->undo_rows = (VimRow *)malloc(sizeof(VimRow) * E->num_rows);
+    for (int i = 0; i < E->num_rows; i++) {
+        E->undo_rows[i].len = E->rows[i].len;
+        E->undo_rows[i].chars = (char *)malloc(E->rows[i].len + 1);
+        memcpy(E->undo_rows[i].chars, E->rows[i].chars, E->rows[i].len + 1);
+    }
+    E->undo_cx = E->cx;
+    E->undo_cy = E->cy;
+    E->has_undo = 1;
+}
+
+static void vim_apply_undo(VimEditor *E) {
+    if (!E->has_undo || !E->undo_rows) {
+        snprintf(E->status_msg, sizeof(E->status_msg), "Already at oldest change");
+        E->status_time = time(NULL);
+        return;
+    }
+    VimRow *tmp_rows = E->rows;
+    int tmp_num = E->num_rows;
+    int tmp_cx = E->cx, tmp_cy = E->cy;
+
+    E->rows = E->undo_rows;
+    E->num_rows = E->undo_num_rows;
+    E->cx = E->undo_cx;
+    E->cy = E->undo_cy;
+
+    E->undo_rows = tmp_rows;
+    E->undo_num_rows = tmp_num;
+    E->undo_cx = tmp_cx;
+    E->undo_cy = tmp_cy;
+
+    E->modified = 1;
+    snprintf(E->status_msg, sizeof(E->status_msg), "1 change; before #1");
+    E->status_time = time(NULL);
+}
+
+static void vim_update_window_size(VimEditor *E) {
+    struct winsize ws;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0 && ws.ws_row > 0) {
+        E->screen_rows = (ws.ws_row >= 3) ? ws.ws_row - 2 : 22;
+        E->screen_cols = ws.ws_col;
+    } else {
+        E->screen_rows = 22;
+        E->screen_cols = 80;
+    }
+}
+
+static void vim_open(VimEditor *E, const char *filename) {
+    E->filename = filename ? strdup(filename) : NULL;
+    E->rows = NULL;
+    E->num_rows = 0;
+    E->cx = 0;
+    E->cy = 0;
+    E->row_offset = 0;
+    E->col_offset = 0;
+    E->modified = 0;
+    E->mode = VIM_MODE_NORMAL;
+    E->yank_buf = NULL;
+    E->show_nu = 1;
+    E->search_pat[0] = '\0';
+    E->undo_rows = NULL;
+    E->undo_num_rows = 0;
+    E->has_undo = 0;
+    E->replace_pending = 0;
+    E->g_pending = 0;
+    E->d_pending = 0;
+    E->y_pending = 0;
+    E->z_pending = 0;
+
+    if (!filename) {
+        vim_insert_row(E, 0, "", 0);
+        E->modified = 0;
+        snprintf(E->status_msg, sizeof(E->status_msg), "[No Name] -- minish vim micro-editor");
+        E->status_time = time(NULL);
+        return;
+    }
+
+    FILE *fp = fopen(filename, "r");
+    if (!fp) {
+        vim_insert_row(E, 0, "", 0);
+        E->modified = 0;
+        snprintf(E->status_msg, sizeof(E->status_msg), "\"%s\" [New File]", filename);
+        E->status_time = time(NULL);
+        return;
+    }
+
+    char *line = NULL;
+    size_t linecap = 0;
+    ssize_t linelen;
+    while ((linelen = getline(&line, &linecap, fp)) != -1) {
+        while (linelen > 0 && (line[linelen - 1] == '\n' || line[linelen - 1] == '\r')) {
+            linelen--;
+        }
+        vim_insert_row(E, E->num_rows, line, (int)linelen);
+    }
+    free(line);
+    fclose(fp);
+
+    if (E->num_rows == 0) vim_insert_row(E, 0, "", 0);
+    E->modified = 0;
+    snprintf(E->status_msg, sizeof(E->status_msg), "\"%s\" %dL", filename, E->num_rows);
+    E->status_time = time(NULL);
+}
+
+static int vim_save(VimEditor *E, const char *opt_name) {
+    const char *target = opt_name ? opt_name : E->filename;
+    if (!target || !target[0]) {
+        snprintf(E->status_msg, sizeof(E->status_msg), "E32: No file name");
+        E->status_time = time(NULL);
+        return -1;
+    }
+
+    int fd = open(target, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+        snprintf(E->status_msg, sizeof(E->status_msg), "E212: Can't open file for writing: %s", strerror(errno));
+        E->status_time = time(NULL);
+        return -1;
+    }
+
+    size_t total_bytes = 0;
+    for (int i = 0; i < E->num_rows; i++) {
+        if (E->rows[i].len > 0) {
+            ssize_t w = write(fd, E->rows[i].chars, E->rows[i].len);
+            if (w < 0) {
+                close(fd);
+                snprintf(E->status_msg, sizeof(E->status_msg), "E514: Write error (disk full ENOSPC?): %s", strerror(errno));
+                E->status_time = time(NULL);
+                return -1;
+            }
+            total_bytes += (size_t)w;
+        }
+        if (write(fd, "\n", 1) < 0) {
+            close(fd);
+            snprintf(E->status_msg, sizeof(E->status_msg), "E514: Write error: %s", strerror(errno));
+            E->status_time = time(NULL);
+            return -1;
+        }
+        total_bytes++;
+    }
+    close(fd);
+
+    if (!E->filename || strcmp(E->filename, target) != 0) {
+        free(E->filename);
+        E->filename = strdup(target);
+    }
+    E->modified = 0;
+    snprintf(E->status_msg, sizeof(E->status_msg), "\"%s\" %dL, %zuB written", target, E->num_rows, total_bytes);
+    E->status_time = time(NULL);
+    return 0;
+}
+
+static int vim_read_key(void) {
+    static int key_peek = -1;
+    if (key_peek != -1) {
+        int k = key_peek;
+        key_peek = -1;
+        return k;
+    }
+
+    int nread;
+    char c;
+    while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
+        if (nread < 0 && errno != EAGAIN && errno != EINTR) return -1;
+    }
+
+    if (c == '\x1b') {
+        char seq[4];
+        int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
+        fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK);
+        int r1 = read(STDIN_FILENO, &seq[0], 1);
+        int r2 = (r1 == 1 && (seq[0] == '[' || seq[0] == 'O')) ? read(STDIN_FILENO, &seq[1], 1) : 0;
+        int r3 = (r2 == 1 && seq[0] == '[') ? read(STDIN_FILENO, &seq[2], 1) : 0;
+        fcntl(STDIN_FILENO, F_SETFL, flags);
+
+        if (r1 == 1 && seq[0] == '[') {
+            if (r2 == 1) {
+                if (seq[1] >= '0' && seq[1] <= '9') {
+                    if (r3 == 1 && seq[2] == '~') {
+                        switch (seq[1]) {
+                            case '1': case '7': return VIM_KEY_HOME;
+                            case '3': return VIM_KEY_DEL;
+                            case '4': case '8': return VIM_KEY_END;
+                            case '5': return VIM_KEY_PAGE_UP;
+                            case '6': return VIM_KEY_PAGE_DOWN;
+                        }
+                    }
+                } else {
+                    switch (seq[1]) {
+                        case 'A': return VIM_KEY_ARROW_UP;
+                        case 'B': return VIM_KEY_ARROW_DOWN;
+                        case 'C': return VIM_KEY_ARROW_RIGHT;
+                        case 'D': return VIM_KEY_ARROW_LEFT;
+                        case 'H': return VIM_KEY_HOME;
+                        case 'F': return VIM_KEY_END;
+                    }
+                }
+            }
+        } else if (r1 == 1 && seq[0] == 'O') {
+            if (r2 == 1) {
+                switch (seq[1]) {
+                    case 'H': return VIM_KEY_HOME;
+                    case 'F': return VIM_KEY_END;
+                }
+            }
+        } else if (r1 == 1) {
+            key_peek = (unsigned char)seq[0];
+            return '\x1b';
+        }
+        return '\x1b';
+    }
+    return (unsigned char)c;
+}
+
+static void vim_draw(VimEditor *E, const char *cmd_buf) {
+    vim_update_window_size(E);
+
+    if (E->cy < E->row_offset) E->row_offset = E->cy;
+    if (E->cy >= E->row_offset + E->screen_rows) {
+        E->row_offset = E->cy - E->screen_rows + 1;
+    }
+    int margin = E->show_nu ? 6 : 0;
+    int avail_cols = E->screen_cols - margin;
+    if (avail_cols < 10) avail_cols = 10;
+
+    if (E->cx < E->col_offset) E->col_offset = E->cx;
+    if (E->cx >= E->col_offset + avail_cols) {
+        E->col_offset = E->cx - avail_cols + 1;
+    }
+
+    struct vim_abuf ab = {NULL, 0, 0};
+    abuf_append(&ab, "\x1b[?25l\x1b[H", 9);
+
+    for (int y = 0; y < E->screen_rows; y++) {
+        int filerow = y + E->row_offset;
+        if (filerow < E->num_rows) {
+            if (E->show_nu) {
+                char numbuf[16];
+                int nlen = snprintf(numbuf, sizeof(numbuf), "\x1b[33m%5d \x1b[0m", filerow + 1);
+                abuf_append(&ab, numbuf, nlen);
+            }
+            int len = E->rows[filerow].len - E->col_offset;
+            if (len < 0) len = 0;
+            if (len > avail_cols) len = avail_cols;
+            if (len > 0) {
+                abuf_append(&ab, &E->rows[filerow].chars[E->col_offset], len);
+            }
+        } else {
+            if (E->show_nu) abuf_append(&ab, "      ", 6);
+            if (E->num_rows == 0 && y == E->screen_rows / 3) {
+                char welcome[80];
+                int wlen = snprintf(welcome, sizeof(welcome), "minish micro-vim editor -- version 1.0.0");
+                if (wlen > avail_cols) wlen = avail_cols;
+                int pad = (avail_cols - wlen) / 2;
+                if (pad > 0) {
+                    abuf_append(&ab, "~", 1);
+                    for (int p = 1; p < pad; p++) abuf_append(&ab, " ", 1);
+                }
+                abuf_append(&ab, welcome, wlen);
+            } else {
+                abuf_append(&ab, "\x1b[34m~\x1b[0m", 9);
+            }
+        }
+        abuf_append(&ab, "\x1b[K\r\n", 5);
+    }
+
+    /* Status Bar */
+    abuf_append(&ab, "\x1b[7m", 4);
+    char status[128], rstatus[64];
+    const char *mname = (E->mode == VIM_MODE_INSERT) ? "-- INSERT --" :
+                        (E->mode == VIM_MODE_COMMAND) ? "-- COMMAND --" :
+                        (E->mode == VIM_MODE_SEARCH) ? "-- SEARCH --" :
+                        (E->replace_pending) ? "-- REPLACE --" : "NORMAL";
+    int len = snprintf(status, sizeof(status), " %s  %s%s",
+                       mname,
+                       E->filename ? E->filename : "[No Name]",
+                       E->modified ? " [+]" : "");
+    int pct = (E->num_rows > 0) ? ((E->cy + 1) * 100) / E->num_rows : 0;
+    int rlen = snprintf(rstatus, sizeof(rstatus), " %d,%d   %d%% ", E->cy + 1, E->cx + 1, pct);
+    if (len > E->screen_cols) len = E->screen_cols;
+    abuf_append(&ab, status, len);
+    while (len < E->screen_cols) {
+        if (E->screen_cols - len == rlen) {
+            abuf_append(&ab, rstatus, rlen);
+            break;
+        } else {
+            abuf_append(&ab, " ", 1);
+            len++;
+        }
+    }
+    abuf_append(&ab, "\x1b[0m\r\n", 6);
+
+    /* Command / Message Bar */
+    abuf_append(&ab, "\x1b[K", 3);
+    if (E->mode == VIM_MODE_COMMAND) {
+        abuf_append(&ab, ":", 1);
+        if (cmd_buf) abuf_append(&ab, cmd_buf, (int)strlen(cmd_buf));
+    } else if (E->mode == VIM_MODE_SEARCH) {
+        abuf_append(&ab, "/", 1);
+        if (cmd_buf) abuf_append(&ab, cmd_buf, (int)strlen(cmd_buf));
+    } else if (E->status_msg[0] && time(NULL) - E->status_time < 5) {
+        abuf_append(&ab, E->status_msg, (int)strlen(E->status_msg));
+    }
+
+    int cursor_y, cursor_x;
+    if (E->mode == VIM_MODE_COMMAND || E->mode == VIM_MODE_SEARCH) {
+        cursor_y = E->screen_rows + 2;
+        cursor_x = 2 + (cmd_buf ? (int)strlen(cmd_buf) : 0);
+    } else {
+        cursor_y = (E->cy - E->row_offset) + 1;
+        cursor_x = margin + (E->cx - E->col_offset) + 1;
+    }
+    char cpos[32];
+    int clen = snprintf(cpos, sizeof(cpos), "\x1b[%d;%dH\x1b[?25h", cursor_y, cursor_x);
+    abuf_append(&ab, cpos, clen);
+
+    if (write(STDOUT_FILENO, ab.b, ab.len) < 0) { /* suppress warn_unused_result */ }
+    abuf_free(&ab);
+}
+
+static void vim_move_cursor(VimEditor *E, int key) {
+    VimRow *row = (E->cy < E->num_rows) ? &E->rows[E->cy] : NULL;
+    switch (key) {
+        case VIM_KEY_ARROW_LEFT:
+        case 'h':
+            if (E->cx > 0) E->cx--;
+            break;
+        case VIM_KEY_ARROW_RIGHT:
+        case 'l':
+            if (row && E->cx < row->len) E->cx++;
+            break;
+        case VIM_KEY_ARROW_UP:
+        case 'k':
+            if (E->cy > 0) E->cy--;
+            break;
+        case VIM_KEY_ARROW_DOWN:
+        case 'j':
+            if (E->cy < E->num_rows - 1) E->cy++;
+            break;
+    }
+    row = (E->cy < E->num_rows) ? &E->rows[E->cy] : NULL;
+    int rowlen = row ? row->len : 0;
+    if (E->mode == VIM_MODE_NORMAL) {
+        if (rowlen > 0 && E->cx >= rowlen) E->cx = rowlen - 1;
+    } else {
+        if (E->cx > rowlen) E->cx = rowlen;
+    }
+}
+
+static void vim_search_next(VimEditor *E, int forward) {
+    if (!E->search_pat[0] || E->num_rows == 0) return;
+    int patlen = (int)strlen(E->search_pat);
+    int start_y = E->cy;
+    int start_x = forward ? E->cx + 1 : E->cx - 1;
+
+    for (int step = 0; step < E->num_rows; step++) {
+        int curr_y = forward ? (start_y + step) % E->num_rows :
+                               (start_y - step + E->num_rows) % E->num_rows;
+        VimRow *r = &E->rows[curr_y];
+        if (r->len < patlen) continue;
+
+        if (curr_y == start_y && step == 0) {
+            if (forward) {
+                if (start_x < r->len) {
+                    char *m = strstr(&r->chars[start_x], E->search_pat);
+                    if (m) {
+                        E->cy = curr_y;
+                        E->cx = (int)(m - r->chars);
+                        return;
+                    }
+                }
+            } else {
+                for (int x = start_x; x >= 0; x--) {
+                    if (strncmp(&r->chars[x], E->search_pat, patlen) == 0) {
+                        E->cy = curr_y;
+                        E->cx = x;
+                        return;
+                    }
+                }
+            }
+        } else {
+            if (forward) {
+                char *m = strstr(r->chars, E->search_pat);
+                if (m) {
+                    E->cy = curr_y;
+                    E->cx = (int)(m - r->chars);
+                    return;
+                }
+            } else {
+                for (int x = r->len - patlen; x >= 0; x--) {
+                    if (strncmp(&r->chars[x], E->search_pat, patlen) == 0) {
+                        E->cy = curr_y;
+                        E->cx = x;
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    snprintf(E->status_msg, sizeof(E->status_msg), "Pattern not found: %.80s", E->search_pat);
+    E->status_time = time(NULL);
+}
+
+static int show_command_help(const char *cmd);
+
+static int builtin_vim(char **args) {
+    if (args[1] && (strcmp(args[1], "--help") == 0 || strcmp(args[1], "-h") == 0)) {
+        show_command_help("vim");
+        return 0;
+    }
+
+    if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
+        fprintf(stderr, "minish: %s: standard input and output must be an interactive terminal\n", args[0] ? args[0] : "vim");
+        return 1;
+    }
+
+    const char *target_file = (args[1] != NULL) ? args[1] : NULL;
+
+    VimEditor E;
+    memset(&E, 0, sizeof(E));
+    vim_open(&E, target_file);
+
+    if (enable_raw_mode() < 0) {
+        fprintf(stderr, "minish: %s: failed to set terminal raw mode\n", args[0] ? args[0] : "vim");
+        return 1;
+    }
+
+    if (write(STDOUT_FILENO, "\x1b[2J\x1b[H", 7) < 0) { /* suppress warn_unused_result */ }
+
+    char cmd_buf[128];
+    cmd_buf[0] = '\0';
+    int cmd_len = 0;
+    int running = 1;
+
+    while (running) {
+        vim_draw(&E, (E.mode == VIM_MODE_COMMAND || E.mode == VIM_MODE_SEARCH) ? cmd_buf : NULL);
+        int c = vim_read_key();
+        if (c < 0) break;
+
+        /* COMMAND (Ex) MODE */
+        if (E.mode == VIM_MODE_COMMAND) {
+            if (c == '\r' || c == '\n') {
+                cmd_buf[cmd_len] = '\0';
+                char *cmd = cmd_buf;
+                while (*cmd == ' ') cmd++;
+
+                if (strcmp(cmd, "q") == 0) {
+                    if (E.modified) {
+                        snprintf(E.status_msg, sizeof(E.status_msg), "E37: No write since last change (add ! to override)");
+                        E.status_time = time(NULL);
+                    } else {
+                        running = 0;
+                    }
+                } else if (strcmp(cmd, "q!") == 0) {
+                    running = 0;
+                } else if (strcmp(cmd, "w") == 0) {
+                    vim_save(&E, NULL);
+                } else if (strncmp(cmd, "w ", 2) == 0) {
+                    char *fname = cmd + 2;
+                    while (*fname == ' ') fname++;
+                    vim_save(&E, fname);
+                } else if (strcmp(cmd, "w!") == 0 || strncmp(cmd, "w! ", 3) == 0) {
+                    char *fname = (strncmp(cmd, "w! ", 3) == 0) ? cmd + 3 : NULL;
+                    if (fname) while (*fname == ' ') fname++;
+                    vim_save(&E, fname);
+                } else if (strcmp(cmd, "wq") == 0 || strcmp(cmd, "x") == 0 || strcmp(cmd, "wq!") == 0 || strcmp(cmd, "x!") == 0) {
+                    if (vim_save(&E, NULL) == 0) {
+                        running = 0;
+                    }
+                } else if (strncmp(cmd, "wq ", 3) == 0) {
+                    char *fname = cmd + 3;
+                    while (*fname == ' ') fname++;
+                    if (vim_save(&E, fname) == 0) {
+                        running = 0;
+                    }
+                } else if (strcmp(cmd, "set nu") == 0 || strcmp(cmd, "set number") == 0) {
+                    E.show_nu = 1;
+                    snprintf(E.status_msg, sizeof(E.status_msg), "number");
+                    E.status_time = time(NULL);
+                } else if (strcmp(cmd, "set nonu") == 0 || strcmp(cmd, "set nonumber") == 0) {
+                    E.show_nu = 0;
+                    snprintf(E.status_msg, sizeof(E.status_msg), "nonumber");
+                    E.status_time = time(NULL);
+                } else if (strcmp(cmd, "$") == 0) {
+                    if (E.num_rows > 0) {
+                        E.cy = E.num_rows - 1;
+                        E.cx = (E.rows[E.cy].len > 0) ? E.rows[E.cy].len - 1 : 0;
+                    }
+                } else if (cmd[0] >= '0' && cmd[0] <= '9') {
+                    int target_line = atoi(cmd);
+                    if (target_line < 1) target_line = 1;
+                    if (target_line > E.num_rows) target_line = E.num_rows;
+                    E.cy = target_line - 1;
+                    E.cx = 0;
+                } else if (strcmp(cmd, "help") == 0) {
+                    snprintf(E.status_msg, sizeof(E.status_msg), ":w[file]=save  :q[!]=quit  :wq=save&quit  :set nu/nonu  :<num>=goto");
+                    E.status_time = time(NULL);
+                } else if (cmd[0] != '\0') {
+                    snprintf(E.status_msg, sizeof(E.status_msg), "E492: Not an editor command: %.80s", cmd);
+                    E.status_time = time(NULL);
+                }
+
+                E.mode = VIM_MODE_NORMAL;
+                cmd_len = 0;
+                cmd_buf[0] = '\0';
+            } else if (c == '\x1b') {
+                E.mode = VIM_MODE_NORMAL;
+                cmd_len = 0;
+                cmd_buf[0] = '\0';
+            } else if (c == VIM_KEY_BACKSPACE || c == 8 || c == 127) {
+                if (cmd_len > 0) {
+                    cmd_len--;
+                    cmd_buf[cmd_len] = '\0';
+                } else {
+                    E.mode = VIM_MODE_NORMAL;
+                }
+            } else if (c >= 32 && c <= 126) {
+                if (cmd_len < (int)sizeof(cmd_buf) - 2) {
+                    cmd_buf[cmd_len++] = (char)c;
+                    cmd_buf[cmd_len] = '\0';
+                }
+            }
+            continue;
+        }
+
+        /* SEARCH MODE */
+        if (E.mode == VIM_MODE_SEARCH) {
+            if (c == '\r' || c == '\n') {
+                cmd_buf[cmd_len] = '\0';
+                if (cmd_len > 0) {
+                    strncpy(E.search_pat, cmd_buf, sizeof(E.search_pat) - 1);
+                    E.search_pat[sizeof(E.search_pat) - 1] = '\0';
+                    vim_search_next(&E, 1);
+                }
+                E.mode = VIM_MODE_NORMAL;
+                cmd_len = 0;
+                cmd_buf[0] = '\0';
+            } else if (c == '\x1b') {
+                E.mode = VIM_MODE_NORMAL;
+                cmd_len = 0;
+                cmd_buf[0] = '\0';
+            } else if (c == VIM_KEY_BACKSPACE || c == 8 || c == 127) {
+                if (cmd_len > 0) {
+                    cmd_len--;
+                    cmd_buf[cmd_len] = '\0';
+                } else {
+                    E.mode = VIM_MODE_NORMAL;
+                }
+            } else if (c >= 32 && c <= 126) {
+                if (cmd_len < (int)sizeof(cmd_buf) - 2) {
+                    cmd_buf[cmd_len++] = (char)c;
+                    cmd_buf[cmd_len] = '\0';
+                }
+            }
+            continue;
+        }
+
+        /* INSERT MODE */
+        if (E.mode == VIM_MODE_INSERT) {
+            if (c == '\x1b') {
+                E.mode = VIM_MODE_NORMAL;
+                VimRow *row = (E.cy < E.num_rows) ? &E.rows[E.cy] : NULL;
+                if (row && E.cx > 0 && E.cx >= row->len) {
+                    E.cx = (row->len > 0) ? row->len - 1 : 0;
+                }
+            } else if (c == '\r' || c == '\n') {
+                VimRow *row = &E.rows[E.cy];
+                if (E.cx >= row->len) {
+                    vim_insert_row(&E, E.cy + 1, "", 0);
+                } else {
+                    vim_insert_row(&E, E.cy + 1, &row->chars[E.cx], row->len - E.cx);
+                    row = &E.rows[E.cy];
+                    row->len = E.cx;
+                    row->chars[row->len] = '\0';
+                }
+                E.cy++;
+                E.cx = 0;
+                E.modified = 1;
+            } else if (c == VIM_KEY_BACKSPACE || c == 8 || c == 127) {
+                if (E.cx > 0) {
+                    VimRow *row = &E.rows[E.cy];
+                    vim_row_del_char(row, E.cx - 1);
+                    E.cx--;
+                    E.modified = 1;
+                } else if (E.cy > 0) {
+                    VimRow *prev = &E.rows[E.cy - 1];
+                    VimRow *curr = &E.rows[E.cy];
+                    E.cx = prev->len;
+                    vim_row_append_string(prev, curr->chars, curr->len);
+                    vim_del_row(&E, E.cy);
+                    E.cy--;
+                    E.modified = 1;
+                }
+            } else if (c == VIM_KEY_DEL) {
+                VimRow *row = &E.rows[E.cy];
+                if (E.cx < row->len) {
+                    vim_row_del_char(row, E.cx);
+                    E.modified = 1;
+                } else if (E.cy < E.num_rows - 1) {
+                    VimRow *next = &E.rows[E.cy + 1];
+                    vim_row_append_string(row, next->chars, next->len);
+                    vim_del_row(&E, E.cy + 1);
+                    E.modified = 1;
+                }
+            } else if (c == '\t') {
+                VimRow *row = &E.rows[E.cy];
+                for (int sp = 0; sp < 4; sp++) {
+                    vim_row_insert_char(row, E.cx++, ' ');
+                }
+                E.modified = 1;
+            } else if (c == VIM_KEY_ARROW_UP || c == VIM_KEY_ARROW_DOWN ||
+                       c == VIM_KEY_ARROW_LEFT || c == VIM_KEY_ARROW_RIGHT) {
+                vim_move_cursor(&E, c);
+            } else if (c >= 32 && c <= 126) {
+                VimRow *row = &E.rows[E.cy];
+                vim_row_insert_char(row, E.cx, c);
+                E.cx++;
+                E.modified = 1;
+            }
+            continue;
+        }
+
+        /* NORMAL MODE */
+        if (E.replace_pending) {
+            E.replace_pending = 0;
+            if (c >= 32 && c <= 126) {
+                vim_save_undo(&E);
+                VimRow *row = (E.cy < E.num_rows) ? &E.rows[E.cy] : NULL;
+                if (row && E.cx < row->len) {
+                    row->chars[E.cx] = (char)c;
+                    E.modified = 1;
+                }
+            }
+            continue;
+        }
+
+        if (E.g_pending) {
+            E.g_pending = 0;
+            if (c == 'g') {
+                E.cy = 0;
+                E.cx = 0;
+                continue;
+            }
+        }
+
+        if (E.d_pending) {
+            E.d_pending = 0;
+            if (c == 'd') {
+                vim_save_undo(&E);
+                free(E.yank_buf);
+                E.yank_buf = strdup(E.rows[E.cy].chars);
+                vim_del_row(&E, E.cy);
+                if (E.num_rows == 0) vim_insert_row(&E, 0, "", 0);
+                if (E.cy >= E.num_rows) E.cy = E.num_rows - 1;
+                E.cx = 0;
+                snprintf(E.status_msg, sizeof(E.status_msg), "1 line deleted");
+                E.status_time = time(NULL);
+                continue;
+            } else if (c == 'w') {
+                vim_save_undo(&E);
+                VimRow *row = &E.rows[E.cy];
+                if (E.cx < row->len) {
+                    int del_start = E.cx;
+                    while (del_start < row->len && !isspace((unsigned char)row->chars[del_start])) {
+                        vim_row_del_char(row, del_start);
+                    }
+                    while (del_start < row->len && isspace((unsigned char)row->chars[del_start])) {
+                        vim_row_del_char(row, del_start);
+                    }
+                    E.modified = 1;
+                }
+                continue;
+            } else if (c == '$') {
+                vim_save_undo(&E);
+                VimRow *row = &E.rows[E.cy];
+                while (row->len > E.cx) vim_row_del_char(row, E.cx);
+                if (E.cx > 0 && E.cx >= row->len) E.cx = (row->len > 0) ? row->len - 1 : 0;
+                E.modified = 1;
+                continue;
+            }
+        }
+
+        if (E.y_pending) {
+            E.y_pending = 0;
+            if (c == 'y') {
+                free(E.yank_buf);
+                E.yank_buf = strdup(E.rows[E.cy].chars);
+                snprintf(E.status_msg, sizeof(E.status_msg), "1 line yanked");
+                E.status_time = time(NULL);
+                continue;
+            }
+        }
+
+        if (E.z_pending) {
+            E.z_pending = 0;
+            if (c == 'Z') {
+                if (vim_save(&E, NULL) == 0) running = 0;
+                continue;
+            } else if (c == 'Q') {
+                running = 0;
+                continue;
+            }
+        }
+
+        switch (c) {
+            case 'h': case VIM_KEY_ARROW_LEFT:
+            case 'j': case VIM_KEY_ARROW_DOWN:
+            case 'k': case VIM_KEY_ARROW_UP:
+            case 'l': case VIM_KEY_ARROW_RIGHT:
+                vim_move_cursor(&E, c);
+                break;
+            case '0':
+                E.cx = 0;
+                break;
+            case '^': {
+                VimRow *row = &E.rows[E.cy];
+                E.cx = 0;
+                while (E.cx < row->len && isspace((unsigned char)row->chars[E.cx])) E.cx++;
+                break;
+            }
+            case '$': {
+                VimRow *row = &E.rows[E.cy];
+                E.cx = (row->len > 0) ? row->len - 1 : 0;
+                break;
+            }
+            case 'w': {
+                VimRow *row = &E.rows[E.cy];
+                while (E.cx < row->len && !isspace((unsigned char)row->chars[E.cx])) E.cx++;
+                while (E.cx < row->len && isspace((unsigned char)row->chars[E.cx])) E.cx++;
+                if (E.cx >= row->len && E.cy < E.num_rows - 1) {
+                    E.cy++;
+                    E.cx = 0;
+                    row = &E.rows[E.cy];
+                    while (E.cx < row->len && isspace((unsigned char)row->chars[E.cx])) E.cx++;
+                }
+                break;
+            }
+            case 'b': {
+                if (E.cx > 0) {
+                    VimRow *row = &E.rows[E.cy];
+                    while (E.cx > 0 && isspace((unsigned char)row->chars[E.cx - 1])) E.cx--;
+                    while (E.cx > 0 && !isspace((unsigned char)row->chars[E.cx - 1])) E.cx--;
+                } else if (E.cy > 0) {
+                    E.cy--;
+                    VimRow *row = &E.rows[E.cy];
+                    E.cx = row->len;
+                    while (E.cx > 0 && isspace((unsigned char)row->chars[E.cx - 1])) E.cx--;
+                    while (E.cx > 0 && !isspace((unsigned char)row->chars[E.cx - 1])) E.cx--;
+                }
+                break;
+            }
+            case 'G':
+                E.cy = (E.num_rows > 0) ? E.num_rows - 1 : 0;
+                E.cx = 0;
+                break;
+            case 'g':
+                E.g_pending = 1;
+                break;
+            case VIM_KEY_PAGE_UP:
+            case 21: /* Ctrl-U */
+                E.cy -= E.screen_rows / 2;
+                if (E.cy < 0) E.cy = 0;
+                break;
+            case VIM_KEY_PAGE_DOWN:
+            case 4: /* Ctrl-D */
+                E.cy += E.screen_rows / 2;
+                if (E.cy >= E.num_rows) E.cy = (E.num_rows > 0) ? E.num_rows - 1 : 0;
+                break;
+
+            case 'i':
+                vim_save_undo(&E);
+                E.mode = VIM_MODE_INSERT;
+                break;
+            case 'I':
+                vim_save_undo(&E);
+                E.cx = 0;
+                while (E.cx < E.rows[E.cy].len && isspace((unsigned char)E.rows[E.cy].chars[E.cx])) E.cx++;
+                E.mode = VIM_MODE_INSERT;
+                break;
+            case 'a':
+                vim_save_undo(&E);
+                if (E.rows[E.cy].len > 0) E.cx++;
+                E.mode = VIM_MODE_INSERT;
+                break;
+            case 'A':
+                vim_save_undo(&E);
+                E.cx = E.rows[E.cy].len;
+                E.mode = VIM_MODE_INSERT;
+                break;
+            case 'o':
+                vim_save_undo(&E);
+                vim_insert_row(&E, E.cy + 1, "", 0);
+                E.cy++;
+                E.cx = 0;
+                E.mode = VIM_MODE_INSERT;
+                break;
+            case 'O':
+                vim_save_undo(&E);
+                vim_insert_row(&E, E.cy, "", 0);
+                E.cx = 0;
+                E.mode = VIM_MODE_INSERT;
+                break;
+
+            case 'x':
+                if (E.rows[E.cy].len > 0) {
+                    vim_save_undo(&E);
+                    vim_row_del_char(&E.rows[E.cy], E.cx);
+                    if (E.cx >= E.rows[E.cy].len && E.cx > 0) E.cx--;
+                    E.modified = 1;
+                }
+                break;
+            case 'r':
+                E.replace_pending = 1;
+                break;
+            case 'd':
+                E.d_pending = 1;
+                break;
+            case 'D':
+                vim_save_undo(&E);
+                while (E.rows[E.cy].len > E.cx) vim_row_del_char(&E.rows[E.cy], E.cx);
+                if (E.cx > 0 && E.cx >= E.rows[E.cy].len) E.cx = (E.rows[E.cy].len > 0) ? E.rows[E.cy].len - 1 : 0;
+                E.modified = 1;
+                break;
+            case 'y':
+                E.y_pending = 1;
+                break;
+            case 'p':
+                if (E.yank_buf) {
+                    vim_save_undo(&E);
+                    vim_insert_row(&E, E.cy + 1, E.yank_buf, (int)strlen(E.yank_buf));
+                    E.cy++;
+                    E.cx = 0;
+                    E.modified = 1;
+                }
+                break;
+            case 'P':
+                if (E.yank_buf) {
+                    vim_save_undo(&E);
+                    vim_insert_row(&E, E.cy, E.yank_buf, (int)strlen(E.yank_buf));
+                    E.cx = 0;
+                    E.modified = 1;
+                }
+                break;
+            case 'J':
+                if (E.cy < E.num_rows - 1) {
+                    vim_save_undo(&E);
+                    VimRow *curr = &E.rows[E.cy];
+                    VimRow *next = &E.rows[E.cy + 1];
+                    vim_row_append_string(curr, " ", 1);
+                    vim_row_append_string(curr, next->chars, next->len);
+                    vim_del_row(&E, E.cy + 1);
+                    E.modified = 1;
+                }
+                break;
+            case 'u':
+                vim_apply_undo(&E);
+                break;
+            case 'Z':
+                E.z_pending = 1;
+                break;
+
+            case '/':
+                E.mode = VIM_MODE_SEARCH;
+                cmd_len = 0;
+                cmd_buf[0] = '\0';
+                break;
+            case 'n':
+                vim_search_next(&E, 1);
+                break;
+            case 'N':
+                vim_search_next(&E, 0);
+                break;
+            case ':':
+                E.mode = VIM_MODE_COMMAND;
+                cmd_len = 0;
+                cmd_buf[0] = '\0';
+                break;
+            default:
+                break;
+        }
+    }
+
+    disable_raw_mode();
+    if (write(STDOUT_FILENO, "\x1b[2J\x1b[H", 7) < 0) { /* suppress warn_unused_result */ }
+
+    for (int i = 0; i < E.num_rows; i++) vim_free_row(&E.rows[i]);
+    free(E.rows);
+    if (E.undo_rows) {
+        for (int i = 0; i < E.undo_num_rows; i++) vim_free_row(&E.undo_rows[i]);
+        free(E.undo_rows);
+    }
+    free(E.filename);
+    free(E.yank_buf);
+
+    return 0;
+}
+
 /* --- Contextual Rich Command Help Engine --- */
 
 static int show_command_help(const char *cmd) {
     if (!cmd) return 0;
+
+    if (strcmp(cmd, "vim") == 0 || strcmp(cmd, "vi") == 0) {
+        printf("\n================================================================================\n");
+        printf("COMMAND: vim / vi [file]\n");
+        printf("CATEGORY: Zero-Dependency Disaster Recovery Modal Micro-Editor\n");
+        printf("================================================================================\n");
+        printf("SYNTAX:\n");
+        printf("  vim [file]                         # Open existing file or new in-memory buffer\n");
+        printf("  vi [file]                          # Standard POSIX vi alias\n\n");
+        printf("PURPOSE & KERNEL MECHANISM:\n");
+        printf("  Provides a 100%% self-contained, in-memory modal text editor for disaster\n");
+        printf("  recovery when /tmp is unavailable, disks are full (ENOSPC), or dynamic linkers\n");
+        printf("  are broken. Never writes swap files (.swp) or temporary scratch files to disk.\n");
+        printf("  Operates via raw ANSI terminal sequences without ncurses or libtinfo.\n\n");
+        printf("MODAL STATES & KEYBINDINGS:\n");
+        printf("  NORMAL MODE (default):\n");
+        printf("    i, I, a, A                       # Insert before / at start / after / at end of line\n");
+        printf("    o, O                             # Open new line below / above\n");
+        printf("    h, j, k, l / Arrow keys          # Left, down, up, right\n");
+        printf("    0, ^, $                          # Line start, first non-space, line end\n");
+        printf("    w, b                             # Next word, previous word\n");
+        printf("    gg, G                            # Jump to top of file, end of file\n");
+        printf("    Ctrl-U, Ctrl-D / PgUp, PgDn      # Half-page scroll up / down\n");
+        printf("    x, r<char>                       # Delete char under cursor, replace char\n");
+        printf("    dd, D                            # Delete line (yank to buffer), delete to EOL\n");
+        printf("    dw                               # Delete word\n");
+        printf("    yy, p, P                         # Yank (copy) line, paste below / above\n");
+        printf("    J                                # Join current line with line below\n");
+        printf("    u                                # Undo last edit\n");
+        printf("    /<pattern>, n, N                 # Forward search, next match, prev match\n");
+        printf("    ZZ, ZQ                           # Save & exit (:wq), quit without saving (:q!)\n");
+        printf("    :                                # Enter Ex command-line mode\n\n");
+        printf("  INSERT MODE:\n");
+        printf("    <Esc>                            # Return to Normal mode\n");
+        printf("    Enter / Backspace / Delete / Tab # Line split, character deletion, 4-space indent\n\n");
+        printf("  EX COMMANDS (:):\n");
+        printf("    :w [file]                        # Write buffer to file\n");
+        printf("    :q / :q!                         # Quit / Force quit (abandon unsaved changes)\n");
+        printf("    :wq / :x                         # Write buffer and exit\n");
+        printf("    :<number>                        # Jump to line number (e.g. :42)\n");
+        printf("    :$                               # Jump to last line\n");
+        printf("    :set nu / :set nonu              # Enable / disable line numbers\n\n");
+        printf("OFFLINE DISASTER RECOVERY RUNBOOKS:\n");
+        printf("  1. Emergency /etc/fstab Rescue (fixing broken UUIDs halting boot):\n");
+        printf("     minish$ vim /etc/fstab\n");
+        printf("     (navigate with j/k, type dd to remove broken mount, type :wq to save)\n\n");
+        printf("  2. In-Memory Emergency Script Creation on 100%% Full Disk (ENOSPC):\n");
+        printf("     minish$ vim /dev/shm/recover.sh\n");
+        printf("================================================================================\n\n");
+        return 1;
+    }
 
     
     if (strcmp(cmd, "detach") == 0) {
@@ -8517,6 +9611,7 @@ static int builtin_help(char **args) {
     printf("  * INTERACTIVE HELP: Type 'help <command>' or '<command> --help' for full kernel\n");
     printf("    mechanisms, exact system effects, and step-by-step offline disaster runbooks.\n\n");
     printf("Stateful Built-ins:\n");
+    printf("  vim / vi [file]       Modal in-memory text editor (normal/insert/ex modes)\n");
     printf("  cd [dir|-]            Change directory (supports tilde ~)\n");
     printf("  export [VAR=VAL]      Export environment variable\n");
     printf("  unset [VAR]           Unset environment variable\n");
@@ -8685,6 +9780,8 @@ static int builtin_exit(char **args) {
 
 /* Built-in table */
 static const BuiltinDef builtins[] = {
+    {"vim",          &builtin_vim,          0},
+    {"vi",           &builtin_vim,          0},
     {"cd",           &builtin_cd,           1},
     {"exit",         &builtin_exit,         1},
     {"export",       &builtin_export,       1},

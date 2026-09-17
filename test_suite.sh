@@ -418,7 +418,16 @@ persistpeek > pp.out
 [ -s pp.out ] && echo "persistpeek audited system persistence vectors"
 rm -f eh.out mg.out ph.out prh.out pp.out
 
-echo "=== Test 49: Cleanup and recursive rm ==="
+echo "=== Test 50: In-Memory Modal Micro-Editor (vim / vi) ==="
+vim --help > vim_help.out
+[ -s vim_help.out ] && grep "Zero-Dependency Disaster Recovery Modal Micro-Editor" vim_help.out > /dev/null && echo "vim --help verified"
+vi --help > vi_help.out
+[ -s vi_help.out ] && grep "Zero-Dependency Disaster Recovery Modal Micro-Editor" vi_help.out > /dev/null && echo "vi alias verified"
+help vim > vim_cmdhelp.out
+[ -s vim_cmdhelp.out ] && grep "MODAL STATES & KEYBINDINGS" vim_cmdhelp.out > /dev/null && echo "help vim keybindings verified"
+rm -f vim_help.out vi_help.out vim_cmdhelp.out
+
+echo "=== Test 51: Cleanup and recursive rm ==="
 cd ..
 rm -rf test_sandbox
 [ ! -d test_sandbox ] && echo "Cleaned up sandbox recursively."
