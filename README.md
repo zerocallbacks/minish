@@ -4,8 +4,6 @@
 
 A standalone, ultra-compact, POSIX-compliant emergency shell designed for system administration, micro-containers, embedded systems, and disaster recovery environments on **Ubuntu/Debian** and **RHEL/Rocky/AlmaLinux/CentOS**.
 
-> 📖 **Comprehensive Manual & Playbooks**: For in-depth architectural specifications and incident response runbooks (100% full disk recovery, ghost file hunting, inode exhaustion, and broken dynamic linkers), see the [Operational & Disaster Recovery Manual](MANUAL.md).
-
 ## Design Philosophy
 
 - **Zero History / Zero Noise**: Does not read, write, or track command history files (`.bash_history`, `.minish_history`, etc.). Leaves zero disk footprint or interactive noise, making it fully functional even when filesystems are 100% full, read-only, or degraded.
