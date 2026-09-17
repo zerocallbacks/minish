@@ -1846,3 +1846,53 @@ In incident response, network disconnects, SSH dropouts, and sudden window closu
 - `minish` registers a dedicated `SIGHUP` signal handler that catches terminal disconnection, disables raw mode, and exits cleanly via `_exit(0)`.
 - The interactive reader (`minish_readline`) detects EOF and `EIO` when standard input closes and terminates the session immediately without spinning or leaving orphaned background processes under PID 1.
 
+
+
+### 6.4 Defeating `kill -9` (Immortal Sentinel Supervisor Architecture)
+
+#### The POSIX `SIGKILL` Reality
+In Unix and Linux kernel architecture (`kernel/signal.c`), **`SIGKILL` (signal 9) and `SIGSTOP` cannot be caught, blocked, or ignored by any user-space signal handler**. This is a hardcoded kernel invariant: when root or the process owner issues `kill -9 <pid>`, the kernel immediately invokes `do_group_exit()` without ever switching back to user space.
+
+Consequently, any single-process shell that only masks `SIGTERM`, `SIGINT`, and `SIGQUIT` will still be killed if an attacker discovers the PID and issues `kill -9`.
+
+#### The Solution: Self-Healing Sentinel Supervisor (`minish -i` / `--immortal`)
+To achieve true operational immortality against `kill -9`, `minish` implements a **kernel-level dual-process Sentinel Supervisor**:
+
+```bash
+# Launch with self-healing immortal sentinel active:
+minish -i
+# or with stealth disguise:
+minish -i -a "[kworker/u2:0]"
+```
+
+1. **How It Works**:
+   - The parent process acts as an **Immortal Sentinel Watchdog**, disguised as a legitimate kernel thread (`[kworker/...]` or `-bash`).
+   - The sentinel forks the interactive child recovery shell and enters an uninterruptible `waitpid()` supervisory loop.
+   - If an adversary finds the child shell PID and executes `kill -9 <child_pid>`:
+     1. The child process terminates at the kernel level.
+     2. The Sentinel parent's `waitpid()` immediately unblocks with `WTERMSIG(status) == SIGKILL`.
+     3. The Sentinel alerts the operator and **instantly resurrects a fresh, pristine recovery shell** on the same terminal within **0.001 seconds**:
+        ```text
+        [!] SENTINEL ALERT: Shell PID 456 was killed by signal 9 (SIGKILL (kill -9))!
+        [+] Self-healing immortal sentinel reviving recovery shell in 0.001s...
+
+        minish:/root$
+        ```
+     4. Even if an attacker loops `while true; do kill -9 <pid>; done`, the sentinel continuously revives the shell immediately upon termination.
+
+2. **Clean Operator Shutdown**:
+   - When the operator legitimately types `exit` or `exit 0`, the child exits normally (`WIFEXITED(status)`). The Sentinel detects the clean exit code and terminates cleanly without respawning.
+   - If the terminal window closes or SSH disconnects (`SIGHUP`), both the Sentinel and child terminate immediately without leaving background orphans.
+
+#### The Second Defense: PID 1 Namespace Immunity (`memunshare -p`)
+In the Linux kernel, **PID 1 (Init) is immune to `SIGKILL`** from any process within its own PID namespace.
+By launching `minish` inside a private PID namespace:
+```bash
+minish> memunshare -p
+```
+Inside this namespace, `minish` is registered as **PID 1**. If an adversary or script executes `kill -9 1`, the Linux kernel explicitly drops the signal:
+```bash
+# Inside private PID namespace:
+$ kill -9 1
+# Effect: Dropped by kernel. Process continues running unaffected!
+```

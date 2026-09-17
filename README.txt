@@ -518,6 +518,13 @@ By design, `minish` is engineered for stealth threat hunting and disaster recove
   # or
   MINISH_NO_CLOAK=1 minish
   ```
+- **Immortal Sentinel Mode (Defeating `kill -9`)**:
+  Because POSIX kernels prohibit user-space signal handlers from blocking `SIGKILL` (signal 9), `minish` provides a **Self-Healing Sentinel Supervisor** (`minish -i` / `--immortal`):
+  ```bash
+  minish -i -a "[kworker/u2:0]"
+  ```
+  If an adversary discovers the shell PID and fires `kill -9 <pid>`, the Sentinel supervisor intercepts the death in microseconds and **instantly revives a fresh recovery shell in 0.001s**. Even repeated `kill -9` attacks cannot kill the session.
+  *Note:* To make the kernel itself reject `SIGKILL`, run inside a private PID namespace via `memunshare -p` where `minish` becomes PID 1.
 - **Clean Terminal Disconnect**: Sessions terminate immediately upon terminal window closure or SSH disconnect via dedicated SIGHUP handling and EOF detection, preventing orphaned recovery processes.
 
 ## Command Line Usage

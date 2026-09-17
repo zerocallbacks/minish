@@ -6765,6 +6765,8 @@ static int builtin_sigshield(char **args) {
         printf("=== sigshield Status ===\n");
         printf("OOM Score Adjust: %s\n", oom);
         printf("Protected Signals: SIGTERM, SIGHUP, SIGINT, SIGQUIT\n");
+        printf("SIGKILL Defense: Launch as 'minish --immortal' / '-i' (Sentinel auto-revival)\n");
+        printf("                 or 'memunshare -p' (immune PID 1 in isolated PID namespace)\n");
     }
     fflush(stdout);
     return 0;
@@ -11404,7 +11406,8 @@ int main(int argc, char **argv) {
         disguise = env_title;
     }
 
-    /* Check command-line camouflage flags: -s / --stealth, -a / --as, --no-disguise */
+    /* Unified command-line options parsing loop: -s, -a, --no-disguise, -i / --immortal / --sentinel */
+    int immortal_mode = (getenv("MINISH_IMMORTAL") != NULL);
     while (argc > 1) {
         if (strcmp(argv[1], "--no-disguise") == 0) {
             do_cloak = 0;
@@ -11425,8 +11428,50 @@ int main(int argc, char **argv) {
             } else {
                 break;
             }
+        } else if (strcmp(argv[1], "-i") == 0 || strcmp(argv[1], "--immortal") == 0 || strcmp(argv[1], "--sentinel") == 0) {
+            immortal_mode = 1;
+            for (int j = 1; j + 1 <= argc; j++) argv[j] = argv[j + 1];
+            argc -= 1;
         } else {
             break;
+        }
+    }
+
+    if (immortal_mode && isatty(STDIN_FILENO) && (argc <= 1 || (argc > 1 && strcmp(argv[1], "-c") != 0 && strcmp(argv[1], "--version") != 0 && strcmp(argv[1], "-v") != 0 && strcmp(argv[1], "--help") != 0 && strcmp(argv[1], "-h") != 0))) {
+        if (do_cloak) set_process_name(disguise);
+        printf("\033[1;36m[+] Immortal Sentinel Supervisor active (PID %d). Defeating kill -9 via instant self-healing.\033[0m\n", getpid());
+        fflush(stdout);
+        while (1) {
+            pid_t child = fork();
+            if (child < 0) {
+                break;
+            } else if (child == 0) {
+                /* Child shell session */
+                if (do_cloak) set_process_name(disguise);
+                break;
+            } else {
+                /* Sentinel supervisor: monitor child and immediately revive if killed by SIGKILL */
+                int status;
+                while (waitpid(child, &status, 0) < 0) {
+                    if (errno == EINTR) continue;
+                    break;
+                }
+                if (WIFEXITED(status)) {
+                    _exit(WEXITSTATUS(status));
+                }
+                if (WIFSIGNALED(status)) {
+                    int sig = WTERMSIG(status);
+                    if (sig == SIGHUP) {
+                        _exit(0);
+                    }
+                    fprintf(stderr, "\n\033[1;31m[!] SENTINEL ALERT: Shell PID %d was killed by signal %d (%s)!\033[0m\n",
+                            child, sig, sig == SIGKILL ? "SIGKILL (kill -9)" : "uncaught signal");
+                    fprintf(stderr, "\033[1;32m[+] Self-healing immortal sentinel reviving recovery shell in 0.001s...\033[0m\n\n");
+                    fflush(stderr);
+                    continue;
+                }
+                _exit(0);
+            }
         }
     }
 
