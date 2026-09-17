@@ -93,15 +93,22 @@
 #define _POSIX_C_SOURCE 200809L
 #define _XOPEN_SOURCE 700
 #define _GNU_SOURCE
+#define _DEFAULT_SOURCE
+#define _BSD_SOURCE
+#define __BSD_VISIBLE 1
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <limits.h>
 #include <unistd.h>
 #include <termios.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
+#include <sys/utsname.h>
+#include <net/if.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <errno.h>
@@ -120,7 +127,6 @@
 #ifdef __linux__
 #include <sys/prctl.h>
 #include <sys/sysinfo.h>
-#include <sys/utsname.h>
 #include <sys/mount.h>
 #include <sys/reboot.h>
 #include <sys/mman.h>
@@ -131,7 +137,6 @@
 #include <linux/fs.h>
 #include <linux/fiemap.h>
 #include <linux/loop.h>
-#include <net/if.h>
 #include <linux/if_packet.h>
 #include <net/ethernet.h>
 #include <sched.h>
@@ -144,6 +149,16 @@
 #ifndef CLONE_NEWPID
 #define CLONE_NEWPID 0x20000000
 #endif
+#endif
+
+#ifdef __FreeBSD__
+#include <sys/param.h>
+#include <sys/sysctl.h>
+#include <sys/mount.h>
+#include <sys/reboot.h>
+#include <sys/mman.h>
+#include <net/ethernet.h>
+#include <libutil.h>
 #endif
 
 #include <sys/socket.h>
@@ -965,6 +980,9 @@ int set_process_name(const char *name) {
 
 #ifdef __linux__
     prctl(PR_SET_NAME, (unsigned long)name, 0, 0, 0);
+#endif
+#ifdef __FreeBSD__
+    setproctitle("-%s", name[0] == '-' ? name + 1 : name);
 #endif
 
     if (proc_argv0 && proc_argv_len > 0) {
@@ -4815,6 +4833,11 @@ static int builtin_dd(char **args) {
 
 /* fiemap <file> */
 static int builtin_fiemap(char **args) {
+#ifndef __linux__
+    (void)args;
+    fprintf(stderr, "minish: fiemap: not supported on this platform (Linux ext4/xfs specific)\n");
+    return 1;
+#else
     if (!args[1]) {
         fprintf(stderr, "minish: fiemap: usage: fiemap <file>\n");
         return 1;
@@ -4859,6 +4882,7 @@ static int builtin_fiemap(char **args) {
     close(fd);
     fflush(stdout);
     return 0;
+#endif
 }
 
 /* losetup [-d loop_dev] [loop_dev] [file] */
@@ -4949,7 +4973,11 @@ static int builtin_swapon(char **args) {
         fprintf(stderr, "minish: swapon: usage: swapon <device|file>\n");
         return 1;
     }
+    #ifdef __FreeBSD__
+    if (swapon(args[1]) != 0) {
+#else
     if (swapon(args[1], 0) != 0) {
+#endif
         perror("minish: swapon");
         return 1;
     }
@@ -4963,7 +4991,11 @@ static int builtin_swapoff(char **args) {
         fprintf(stderr, "minish: swapoff: usage: swapoff <device|file>\n");
         return 1;
     }
+    #ifdef __FreeBSD__
+    if (swapoff(args[1], 0) != 0) {
+#else
     if (swapoff(args[1]) != 0) {
+#endif
         perror("minish: swapoff");
         return 1;
     }
@@ -5129,6 +5161,11 @@ struct minish_pcaprec_hdr {
 
 /* pcapdump <iface> <count> [outfile] */
 static int builtin_pcapdump(char **args) {
+#ifndef __linux__
+    (void)args;
+    fprintf(stderr, "minish: pcapdump: raw AF_PACKET sniffing not supported on FreeBSD (use tcpdump)\n");
+    return 1;
+#else
     if (!args[1] || !args[2]) {
         fprintf(stderr, "minish: pcapdump: usage: pcapdump <interface> <packet_count> [output.pcap|-]\n");
         return 1;
@@ -5199,6 +5236,7 @@ static int builtin_pcapdump(char **args) {
     if (out != stdout) fclose(out);
     fprintf(stderr, "Successfully captured %d packets.\n", captured);
     return 0;
+#endif
 }
 
 /* ipaddr [iface] [ip/mask] */
@@ -5224,7 +5262,11 @@ static int builtin_ipaddr(char **args) {
                     strncpy(ip_str, inet_ntoa(sin->sin_addr), sizeof(ip_str) - 1);
                 }
                 if (ioctl(fd, SIOCGIFNETMASK, &ifr) == 0) {
+#ifdef __FreeBSD__
+                    struct sockaddr_in *sin = (struct sockaddr_in *)&ifr.ifr_addr;
+#else
                     struct sockaddr_in *sin = (struct sockaddr_in *)&ifr.ifr_netmask;
+#endif
                     strncpy(mask_str, inet_ntoa(sin->sin_addr), sizeof(mask_str) - 1);
                 }
                 printf("%-10s %-16s %-16s\n", de->d_name, ip_str, mask_str);
@@ -5267,7 +5309,11 @@ static int builtin_ipaddr(char **args) {
 
         /* Set netmask */
         uint32_t mask_val = (prefix == 0) ? 0 : (~0U << (32 - prefix));
+#ifdef __FreeBSD__
+        sin = (struct sockaddr_in *)&ifr.ifr_addr;
+#else
         sin = (struct sockaddr_in *)&ifr.ifr_netmask;
+#endif
         sin->sin_family = AF_INET;
         sin->sin_addr.s_addr = htonl(mask_val);
         ioctl(fd, SIOCSIFNETMASK, &ifr);
@@ -11343,25 +11389,37 @@ int main(int argc, char **argv) {
     /* Ignore SIGINT in interactive parent shell */
     signal(SIGINT, SIG_IGN);
 
-    /* Automatic stealth & process camouflage check */
-    const char *env_title = getenv("MINISH_TITLE");
-    if (env_title && env_title[0]) {
-        set_process_name(env_title);
-    } else if (getenv("MINISH_STEALTH")) {
-        set_process_name("-bash");
+    /* Automatic stealth & process camouflage:
+     * By default, minish immediately disguises its process title to '-bash'
+     * so it never exposes itself in ps -ef, ps aux, top, or /proc/[pid]/cmdline.
+     * Can be customized via MINISH_TITLE or -s / -a flags, or disabled via MINISH_NO_CLOAK / --no-disguise. */
+    int do_cloak = 1;
+    if (getenv("MINISH_NO_CLOAK") || getenv("MINISH_DEBUG")) {
+        do_cloak = 0;
     }
 
-    /* Check command-line camouflage flags: -s / --stealth, -a / --as */
+    const char *env_title = getenv("MINISH_TITLE");
+    const char *disguise = "-bash";
+    if (env_title && env_title[0]) {
+        disguise = env_title;
+    }
+
+    /* Check command-line camouflage flags: -s / --stealth, -a / --as, --no-disguise */
     while (argc > 1) {
-        if (strcmp(argv[1], "-s") == 0 || strcmp(argv[1], "--stealth") == 0) {
-            const char *disguise = (argc > 2 && argv[2][0] != '-') ? argv[2] : "-bash";
-            set_process_name(disguise);
+        if (strcmp(argv[1], "--no-disguise") == 0) {
+            do_cloak = 0;
+            for (int j = 1; j + 1 <= argc; j++) argv[j] = argv[j + 1];
+            argc -= 1;
+        } else if (strcmp(argv[1], "-s") == 0 || strcmp(argv[1], "--stealth") == 0) {
+            do_cloak = 1;
+            disguise = (argc > 2 && argv[2][0] != '-') ? argv[2] : "-bash";
             int shift = (argc > 2 && argv[2][0] != '-') ? 2 : 1;
             for (int j = 1; j + shift <= argc; j++) argv[j] = argv[j + shift];
             argc -= shift;
         } else if (strcmp(argv[1], "-a") == 0 || strcmp(argv[1], "--as") == 0) {
             if (argc > 2) {
-                set_process_name(argv[2]);
+                do_cloak = 1;
+                disguise = argv[2];
                 for (int j = 1; j + 2 <= argc; j++) argv[j] = argv[j + 2];
                 argc -= 2;
             } else {
@@ -11370,6 +11428,10 @@ int main(int argc, char **argv) {
         } else {
             break;
         }
+    }
+
+    if (do_cloak) {
+        set_process_name(disguise);
     }
 
     if (argc > 1) {

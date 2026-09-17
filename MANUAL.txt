@@ -1042,6 +1042,45 @@ Engineered specifically for environments under active adversary compromise where
 
 ---
 
+### 3.15 Process Detachment & Background Job Management
+
+In live incident response, long-running digital forensics and threat hunting tools (such as Volatility memory extraction or Velociraptor endpoints) must run asynchronously in the background without blocking the operator's primary shell session or terminating when the operator detaches.
+
+#### detach <command...> [arguments]
+Spawns target process in a detached background execution group with disassociated I/O descriptors.
+`ash
+minish> detach ./volatility -f /dev/shm/mem.raw linux.pslist
+[+] Detached Job [1] (PID: 4892) running: ./volatility -f /dev/shm/mem.raw linux.pslist
+`
+
+#### jobs
+Lists all currently active detached background jobs tracked by minish.
+`ash
+minish> jobs
+[1]  Running  PID: 4892  CMD: ./volatility -f /dev/shm/mem.raw linux.pslist
+`
+
+#### stop <job_id>
+Sends SIGTERM to gracefully terminate target background job. If invoked again on an unresponsive job, escalates to SIGKILL (kill -9).
+`ash
+minish> stop 1
+[+] Sent SIGTERM to Job [1] (PID: 4892)
+`
+
+#### ttach <job_id>
+Reattaches operator I/O to a detached background job for live output monitoring and progress tracking.
+`ash
+minish> attach 1
+[+] Attached to Job [1] (PID: 4892)
+`
+
+#### disown <job_id>
+Removes target background job from minish's internal tracking table. The process continues running as an independent daemon under PID 1 (init / systemd) even after minish exits.
+`ash
+minish> disown 1
+[+] Disowned Job [1] (PID: 4892). Process will persist independently.
+`
+
 ## 4. Emergency Triage Runbooks
 
 ### Runbook A: The 100% Full Disk Outage (`ENOSPC`)
