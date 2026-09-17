@@ -4,6 +4,9 @@ A standalone, ultra-compact, POSIX-compliant emergency shell designed for system
 
 > 📖 **Comprehensive Manual & Playbooks**: For in-depth architectural specifications and incident response runbooks (100% full disk recovery, ghost file hunting, inode exhaustion, and broken dynamic linkers), see the [Operational & Disaster Recovery Manual](MANUAL.txt).
 
+
+> **Comprehensive Operational Reference**: For complete kernel mechanisms, failure modes, anti-kill armor, and in-depth runbooks, refer to [MANUAL.md](MANUAL.md) or [MANUAL.txt](MANUAL.txt).
+
 ## Design Philosophy
 
 - **Zero History / Zero Noise**: Does not read, write, or track command history files (`.bash_history`, `.minish_history`, etc.). Leaves zero disk footprint or interactive noise, making it fully functional even when filesystems are 100% full, read-only, or degraded.
